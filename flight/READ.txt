@@ -1,7 +1,10 @@
-code tasks
--Read data from multiple onboard sensors
--Save that data to log files (JSONL)
--Optionally save images
--Run at a fixed update rate
--Prevent the Pi’s storage from filling up
--Shut down cleanly if something goes wrong
+code logic
+-start loop timer
+-build record (timestamp, seq)
+-read sensors -> record
+-read power/health -> record
+-maybe capture image -> record
+-send radio -> record
+-append JSONL -> record
+-cleanup occasionally
+-sleep to rate
