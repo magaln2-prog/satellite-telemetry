@@ -8,3 +8,39 @@ code logic
 -append JSONL -> record
 -cleanup occasionally
 -sleep to rate
+
+sx126x.py = a radio driver that can:
+send a single packet without silently chunking
+read a raw RX burst
+parse meta + payload cleanly (src addr, freq, rssi)
+    send(bytes) — one write only (raise if too large instead of chunking)
+
+    recv_packet(timeout) — read one UART burst
+
+    parse_packet(pkt) — return (meta, payload) where payload is just your application bytes
+        helpers for fixed mode:
+
+    build_fixed_tx_frame(dest_addr, payload) → returns [DEST_H][DEST_L][CHAN] + payload
+
+    max_app_payload_bytes() → tells you the safe payload size for the selected buffer size
+
+rx_to_latest.py
+    an application receiver that can:
+    call the driver to get (meta, payload)
+    reassemble newline-delimited JSON (buffer until \n)
+    write latest.json atomically
+    append to logs/history.jsonl
+    log bad chunks to logs/rx_raw.log
+
+  1) Read packets from sx126x (UART -> LoRa)
+  2) Extract (meta, payload)
+  3) Reassemble newline-delimited JSON (your flight TX ends each message with \n)
+  4) Write latest.json (atomic) for the dashboard
+  5) Append to logs/history.jsonl (JSONL)
+  6) Keep a raw debug log of decode failures
+
+Assumptions:
+  - Flight side sends compact JSON packets ended by "\n".
+  - Flight side uses module fixed transmit framing (3-byte dest header), NOT an extra custom header.
+    If extra bytes sneak in, we try a safe fallback: strip leading bytes before the first '{'.
+"""

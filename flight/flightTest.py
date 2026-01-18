@@ -52,7 +52,7 @@ LORA_CRYPT = 0
 LORA_RSSI = True
 
 #must match driver to avoid split frames
-LORA_BUFFER_SIZE = 230  #RLLY IMPORTANT. Was previously 240 which mismatched other stuff possibly--------------
+LORA_BUFFER_SIZE = 240  #RLLY IMPORTANT. Could cause a bug possibly--------------
 LORA_TX_RETRIES = 3
 LORA_TX_GAP_S = 0.35
 
