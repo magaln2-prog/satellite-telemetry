@@ -674,8 +674,9 @@ def main() -> None:
 
     telemetry_hz = 1.0
 
-    # Base folder for all runs
-    base_dir = Path("/home/pi/hab")
+    # Base folder for all runs (portable: works on any user/machine)
+    base_dir = Path(__file__).resolve().parent
+
 
     # Storage caps (MB)
     max_log_mb = 200
