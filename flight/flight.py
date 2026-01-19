@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""flight_fixed.py
+"""flight.py
 
 Flight-side telemetry script (Raspberry Pi payload).
 
@@ -10,28 +10,25 @@ What this script does (high-level):
   3) Optionally captures a JPEG using rpicam-still (stores *metadata* only).
   4) Builds TWO telemetry records:
        - A full record written locally as JSONL (one JSON per line).
-       - A compact record sent over LoRa (newline-delimited JSON).
+       - A compact record sent over LoRa USING FRAMED FRAGMENTS (reliable).
   5) Runs forever at a fixed telemetry rate without busy-waiting.
 
-Important reliability rules used here:
-  - **Never truncate JSON bytes**. Truncating causes broken JSON on the ground.
-    If a packet is too large, we send a tiny fallback packet instead.
-  - **Use one UART frame per LoRa packet**. The sx126x driver is patched to
-    raise if the frame is too large, instead of silently chunking.
-  - **Receiver reassembly happens on the ground** (rx_to_latest.py buffers
-    until it sees '\n'). The flight side always appends '\n' to each packet.
+Why framed fragments?
+  - LoRa/UART links fragment, drop, and occasionally corrupt bytes.
+  - Newline-delimited JSON is fragile (partial JSON breaks ground parsing).
+  - A framed protocol makes reassembly deterministic and reliable.
 """
 
 # -------------------------
 # Standard libraries
 # -------------------------
-import json  # JSON encode/decode
-import shutil  # disk usage + deleting old files
-import subprocess  # run system commands like vcgencmd and rpicam-still
-from pathlib import Path  # clean path handling
+import json
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any, Dict
-import time  # sleep + timing
-from datetime import datetime, timezone  # timestamps in UTC
+import time
+from datetime import datetime, timezone
 
 # -------------------------
 # Hardware / sensor libraries
@@ -70,54 +67,38 @@ CAMERA_TIMEOUT_S = 8
 # -------------------------
 # LoRa settings
 # -------------------------
-LORA_PORT = "/dev/serial0"      # UART device
-LORA_FREQ_MHZ = 915             # must be within module band (850–930 for 900MHz model)
-LORA_SRC_ADDR = 1               # this node's address (configured in the module)
-LORA_DEST_ADDR = 65535          # broadcast on many Ebyte/Waveshare modules
+LORA_PORT = "/dev/serial0"
+LORA_FREQ_MHZ = 915
+LORA_SRC_ADDR = 1
+LORA_DEST_ADDR = 65535
 LORA_POWER_DBM = 22
 LORA_AIR_SPEED = 2400
 LORA_NET_ID = 0
 LORA_CRYPT = 0
 LORA_RSSI = True
 
-# Driver-supported package sizes are typically: 240, 128, 64, 32
-# IMPORTANT: This is the module's maximum *UART packet size*.
+# Module's maximum UART packet size
 LORA_BUFFER_SIZE = 240
 
 # TX behavior
 LORA_TX_RETRIES = 3
-LORA_TX_GAP_S = 0.35
+LORA_TX_GAP_S = 0.20  # slightly faster now that we send multiple fragments
 
-# The 3rd header byte in fixed-address mode is commonly a "frequency offset".
-# For 900MHz modules: offset = freq_mhz - 850 (0..80).
+# For 900MHz modules: offset = freq_mhz - 850
 LORA_BASE_FREQ_MHZ = 850
 
-# -------------------------
+# --------------------------------------------------------------------------------------------------
 # Time helpers
-# -------------------------
+# --------------------------------------------------------------------------------------------------
 
 def utc_timestamp_iso() -> str:
-    """Return current UTC time in ISO format (good for logs + syncing)."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
-# -------------------------
+# --------------------------------------------------------------------------------------------------
 # Local logging (JSONL)
-# -------------------------
+# --------------------------------------------------------------------------------------------------
 
 def append_jsonl_safe(path: Path, record: Dict[str, Any]) -> str | None:
-    """Append one telemetry record as a single JSON line.
-
-    Why JSONL?
-      - Easy to append (no re-writing the whole file)
-      - Easy to stream/parse (one object per line)
-      - Survives power loss better than a single giant JSON array
-
-    Returns:
-      None on success, or an error string on failure.
-
-    Flight rule:
-      - Never crash the main loop due to logging.
-    """
     try:
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n")
@@ -125,29 +106,25 @@ def append_jsonl_safe(path: Path, record: Dict[str, Any]) -> str | None:
     except Exception as e:
         return repr(e)
 
-# -------------------------
+# --------------------------------------------------------------------------------------------------
 # Loop pacing (avoid overheating / busy-wait)
-# -------------------------
+# --------------------------------------------------------------------------------------------------
 
 def sleep_to_rate(loop_start_time_s: float, telemetry_hz: float) -> None:
-    """Sleep enough to maintain telemetry_hz, without busy-waiting."""
     period_s = 1.0 / telemetry_hz
     elapsed_s = time.time() - loop_start_time_s
     time.sleep(max(0.0, period_s - elapsed_s))
 
-# -------------------------
+# --------------------------------------------------------------------------------------------------
 # Storage cleanup
-# -------------------------
+# --------------------------------------------------------------------------------------------------
 
 def cleanup_folder_to_mb(folder: Path, max_mb: int) -> int:
-    """Delete oldest files until folder is under max_mb. Returns deleted count."""
     if not folder.exists():
         return 0
 
     max_bytes = max_mb * 1024 * 1024
     files = [p for p in folder.rglob("*") if p.is_file()]
-
-    # Sort oldest first so we delete old runs before new ones.
     files.sort(key=lambda p: p.stat().st_mtime)
 
     total_bytes = sum(p.stat().st_size for p in files)
@@ -164,7 +141,6 @@ def cleanup_folder_to_mb(folder: Path, max_mb: int) -> int:
             if total_bytes <= max_bytes:
                 break
         except Exception:
-            # Never crash cleanup.
             pass
 
     return deleted
@@ -174,30 +150,17 @@ def cleanup_folder_to_mb(folder: Path, max_mb: int) -> int:
 # --------------------------------------------------------------------------------------------------
 
 def ups_read_u16(ups_bus: SMBus, reg: int) -> int:
-    """Read unsigned 16-bit value from UPS registers (little-endian)."""
     lo = ups_bus.read_byte_data(UPS_I2C_ADDR, reg)
     hi = ups_bus.read_byte_data(UPS_I2C_ADDR, reg + 1)
     return (hi << 8) | lo
 
 
 def ups_read_i16(ups_bus: SMBus, reg: int) -> int:
-    """Read signed 16-bit value from UPS registers."""
     v = ups_read_u16(ups_bus, reg)
     return v - 65536 if v & 0x8000 else v
 
 
 def read_ups_status(ups_bus: SMBus) -> tuple[Dict[str, Any], str | None]:
-    """Read UPS battery telemetry.
-
-    Returns:
-      (power_status, error)
-
-    power_status example:
-      {"battery_v": 3.98, "battery_a": 0.12, "battery_pct": 82, ...}
-
-    Flight rule:
-      - never raise; return an error string instead.
-    """
     try:
         batt_mv = ups_read_u16(ups_bus, 0x20)
         batt_ma = ups_read_i16(ups_bus, 0x22)
@@ -218,7 +181,6 @@ def read_ups_status(ups_bus: SMBus) -> tuple[Dict[str, Any], str | None]:
 
 
 def compute_battery_alerts(power_status: Dict[str, Any]) -> list[str]:
-    """Convert battery readings into human-meaningful alert tags."""
     alerts: list[str] = []
     pct = power_status.get("battery_pct")
     v = power_status.get("battery_v")
@@ -239,7 +201,6 @@ def compute_battery_alerts(power_status: Dict[str, Any]) -> list[str]:
 # --------------------------------------------------------------------------------------------------
 
 def _run_cmd(cmd: list[str]) -> tuple[str, str | None]:
-    """Run a command and return (stdout, error). Never raises."""
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
         return out.strip(), None
@@ -248,7 +209,6 @@ def _run_cmd(cmd: list[str]) -> tuple[str, str | None]:
 
 
 def read_pi_throttle_flags() -> tuple[Dict[str, Any], str | None]:
-    """Read Pi power/throttle flags from 'vcgencmd get_throttled'."""
     out, err = _run_cmd(["vcgencmd", "get_throttled"])
     if err:
         return {}, err
@@ -271,7 +231,6 @@ def read_pi_throttle_flags() -> tuple[Dict[str, Any], str | None]:
 
 
 def read_cpu_temp_c() -> tuple[float | None, str | None]:
-    """Read Pi CPU temperature in Celsius via vcgencmd."""
     out, err = _run_cmd(["vcgencmd", "measure_temp"])
     if err:
         return None, err
@@ -284,7 +243,6 @@ def read_cpu_temp_c() -> tuple[float | None, str | None]:
 
 
 def read_uptime_s() -> tuple[float | None, str | None]:
-    """Read uptime seconds from /proc/uptime."""
     try:
         with open("/proc/uptime", "r", encoding="utf-8") as f:
             uptime_s = float(f.read().split()[0])
@@ -294,7 +252,6 @@ def read_uptime_s() -> tuple[float | None, str | None]:
 
 
 def read_mem_info_mb() -> tuple[Dict[str, Any], str | None]:
-    """Read basic memory stats from /proc/meminfo in MB."""
     try:
         wanted = {"MemTotal": None, "MemFree": None, "MemAvailable": None}
         with open("/proc/meminfo", "r", encoding="utf-8") as f:
@@ -315,7 +272,6 @@ def read_mem_info_mb() -> tuple[Dict[str, Any], str | None]:
 
 
 def read_disk_free_mb(path: Path) -> tuple[float | None, str | None]:
-    """Disk free for a path in MB."""
     try:
         du = shutil.disk_usage(str(path))
         return du.free / (1024 * 1024), None
@@ -324,7 +280,6 @@ def read_disk_free_mb(path: Path) -> tuple[float | None, str | None]:
 
 
 def read_pi_health_status(data_root: Path) -> tuple[Dict[str, Any], Dict[str, str]]:
-    """Combine Pi health readings into one dict + one errors dict."""
     health: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
 
@@ -365,25 +320,14 @@ def read_pi_health_status(data_root: Path) -> tuple[Dict[str, Any], Dict[str, st
 # --------------------------------------------------------------------------------------------------
 
 def capture_image_jpeg(images_dir: Path, sequence_id: int) -> tuple[Dict[str, Any], str | None]:
-    """Capture a JPEG using rpicam-still.
-
-    Returns:
-      (image_info, error)
-
-    image_info example:
-      {"path": "/home/pi/hab/.../img_000123.jpg", "bytes": 12345}
-
-    We store metadata only (path/size), NOT the image bytes.
-    """
     try:
         images_dir.mkdir(parents=True, exist_ok=True)
         img_path = images_dir / f"img_{sequence_id:06d}.jpg"
 
-        # rpicam-still is the modern camera tool on Raspberry Pi OS.
         cmd = [
             "rpicam-still",
-            "-n",                # no preview
-            "-t", "300",         # capture delay ms
+            "-n",
+            "-t", "300",
             "--width", str(IMG_W),
             "--height", str(IMG_H),
             "-q", str(IMG_Q),
@@ -407,7 +351,6 @@ def capture_image_jpeg(images_dir: Path, sequence_id: int) -> tuple[Dict[str, An
 # --------------------------------------------------------------------------------------------------
 
 def init_lora_radio() -> tuple[Any | None, str | None]:
-    """Initialize LoRa radio using sx126x driver."""
     try:
         lora = sx126x.sx126x(
             serial_num=LORA_PORT,
@@ -429,13 +372,6 @@ def init_lora_radio() -> tuple[Any | None, str | None]:
 
 
 def compute_freq_off(freq_mhz: int) -> int:
-    """Compute the fixed-mode frequency offset byte.
-
-    For 900MHz modules, base is typically 850MHz.
-    Example: 915MHz -> off = 65.
-
-    This value goes into the 3rd header byte.
-    """
     off = int(freq_mhz) - int(LORA_BASE_FREQ_MHZ)
     if not (0 <= off <= 255):
         raise ValueError(f"Frequency offset out of range: freq={freq_mhz} base={LORA_BASE_FREQ_MHZ} off={off}")
@@ -443,14 +379,6 @@ def compute_freq_off(freq_mhz: int) -> int:
 
 
 def build_fixed_frame(dest_addr: int, payload: bytes) -> bytes:
-    """Build a fixed-addressing UART frame.
-
-    Fixed mode header (3 bytes):
-      [DEST_H][DEST_L][FREQ_OFFSET]
-
-    The patched sx126x driver also includes `build_fixed_tx_frame()`. We keep
-    a local helper here so the flight script stays readable.
-    """
     freq_off = compute_freq_off(LORA_FREQ_MHZ)
     return bytes([
         (dest_addr >> 8) & 0xFF,
@@ -458,15 +386,38 @@ def build_fixed_frame(dest_addr: int, payload: bytes) -> bytes:
         freq_off & 0xFF,
     ]) + payload
 
+# --------------------------------------------------------------------------------------------------
+# Telemetry framing protocol (inline, so you only edit ONE file on flight)
+# --------------------------------------------------------------------------------------------------
+
+import struct
+
+_TM_MAGIC = b"TM"
+_TM_VER = 1
+_TM_HDR_FMT = ">2sB H B B B H"  # MAGIC, VER, MSG_ID, IDX, TOT, LEN, CRC16
+_TM_HDR_LEN = struct.calcsize(_TM_HDR_FMT)
+
+def _crc16_ccitt(data: bytes, poly: int = 0x1021, init: int = 0xFFFF) -> int:
+    crc = init
+    for b in data:
+        crc ^= (b << 8)
+        for _ in range(8):
+            crc = ((crc << 1) ^ poly) if (crc & 0x8000) else (crc << 1)
+            crc &= 0xFFFF
+    return crc
+
+def _tm_build_frame(msg_id: int, frag_idx: int, frag_tot: int, payload: bytes) -> bytes:
+    if len(payload) > 255:
+        raise ValueError("TM payload too long (len>255)")
+    header_wo_crc = struct.pack(">B H B B B", _TM_VER, msg_id & 0xFFFF, frag_idx, frag_tot, len(payload))
+    crc = _crc16_ccitt(header_wo_crc + payload)
+    return struct.pack(_TM_HDR_FMT, _TM_MAGIC, _TM_VER, msg_id & 0xFFFF, frag_idx, frag_tot, len(payload), crc) + payload
+
+# --------------------------------------------------------------------------------------------------
+# Compact packet build + TX (FRAMED FRAGMENTS)
+# --------------------------------------------------------------------------------------------------
 
 def build_compact_radio_packet(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a small radio packet from the full record.
-
-    Keep it tiny:
-      - short keys
-      - fewer nested fields
-      - don't include big arrays unless needed
-    """
     env = record.get("environment", {}) or {}
     power = record.get("power", {}) or {}
     alerts = record.get("alerts", []) or []
@@ -482,7 +433,6 @@ def build_compact_radio_packet(record: Dict[str, Any]) -> Dict[str, Any]:
         "img": 1 if (record.get("image", {}) or {}).get("captured") else 0,
     }
 
-    # Only include alerts if they exist (saves bytes most of the time).
     if alerts:
         pkt["alerts"] = alerts
 
@@ -490,58 +440,76 @@ def build_compact_radio_packet(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, Any]:
-    """Send compact packet over LoRa with retries.
+    """
+    Send compact telemetry over LoRa using FRAMED FRAGMENTS.
 
-    Important:
-      - We never cut JSON bytes.
-      - If too big, we send a tiny fallback packet that is guaranteed valid JSON.
+    - No newline JSON streaming.
+    - Ground reassembles msg_id + fragments, verifies CRC, then decodes JSON.
     """
     if lora is None:
         return {"enabled": False, "tx_success": False, "tx_error": "lora_none"}
 
-    # Newline-delimited JSON. The receiver buffers until it sees '\n'.
-    payload = (json.dumps(packet, separators=(",", ":")) + "\n").encode("utf-8")
+    # Encode ONCE (compact JSON bytes)
+    blob = json.dumps(packet, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
-    # For fixed header [DEST_H][DEST_L][FREQ_OFF] we reserve 3 bytes.
-    # Ask the driver for the exact maximum (it knows buffer_size).
-    max_payload = lora.max_app_payload_bytes(header_len=3)
+    # Reserve 3 bytes for fixed-address header [DEST_H][DEST_L][FREQ_OFF]
+    max_app = lora.max_app_payload_bytes(header_len=3)
 
-    payload_truncated = False
-    if len(payload) > max_payload:
-        # Do NOT slice the JSON bytes. That creates broken JSON on the ground.
-        # Instead send a tiny packet that still conveys time/sequence.
-        tiny = {"ts": packet.get("ts"), "seq": packet.get("seq"), "E": "too_big"}
-        payload = (json.dumps(tiny, separators=(",", ":")) + "\n").encode("utf-8")
-        payload_truncated = True
+    # Each fragment also needs the TM header
+    max_chunk = max_app - _TM_HDR_LEN
+    if max_chunk <= 0:
+        return {"enabled": True, "tx_success": False, "tx_error": "buffer_too_small", "max_app": max_app}
 
-    # Build a full UART frame (header + payload).
-    frame = build_fixed_frame(LORA_DEST_ADDR, payload)
+    # Fragment
+    chunks = [blob[i:i + max_chunk] for i in range(0, len(blob), max_chunk)]
+    frag_tot = len(chunks)
+    msg_id = int(packet.get("seq") or 0) & 0xFFFF
 
+    sent = 0
     last_err: str | None = None
-    for attempt in range(1, LORA_TX_RETRIES + 1):
+
+    for frag_idx, chunk in enumerate(chunks):
         try:
-            lora.send(frame)  # patched driver raises if frame > buffer_size
-            time.sleep(LORA_TX_GAP_S)
+            tm_payload = _tm_build_frame(msg_id, frag_idx, frag_tot, chunk)
+        except Exception as e:
+            return {"enabled": True, "tx_success": False, "tx_error": f"tm_build:{repr(e)}"}
+
+        frame = build_fixed_frame(LORA_DEST_ADDR, tm_payload)
+
+        ok = False
+        for attempt in range(1, LORA_TX_RETRIES + 1):
+            try:
+                lora.send(frame)
+                ok = True
+                sent += 1
+                time.sleep(LORA_TX_GAP_S)
+                break
+            except Exception as e:
+                last_err = repr(e)
+                time.sleep(LORA_TX_GAP_S)
+
+        if not ok:
             return {
                 "enabled": True,
-                "tx_success": True,
-                "attempt": attempt,
-                "frame_len_bytes": len(frame),
-                "payload_truncated": payload_truncated,
-                "max_payload": max_payload,
+                "tx_success": False,
+                "tx_error": last_err or "tx_failed",
+                "msg_id": msg_id,
+                "frags_total": frag_tot,
+                "frags_sent": sent,
+                "bytes": len(blob),
+                "max_app": max_app,
+                "max_chunk": max_chunk,
             }
-        except Exception as e:
-            last_err = repr(e)
-            time.sleep(LORA_TX_GAP_S)
 
     return {
         "enabled": True,
-        "tx_success": False,
-        "attempt": LORA_TX_RETRIES,
-        "frame_len_bytes": len(frame),
-        "payload_truncated": payload_truncated,
-        "tx_error": last_err or "unknown",
-        "max_payload": max_payload,
+        "tx_success": True,
+        "msg_id": msg_id,
+        "frags_total": frag_tot,
+        "frags_sent": sent,
+        "bytes": len(blob),
+        "max_app": max_app,
+        "max_chunk": max_chunk,
     }
 
 # --------------------------------------------------------------------------------------------------
@@ -549,7 +517,6 @@ def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, An
 # --------------------------------------------------------------------------------------------------
 
 def create_run_directories(base_dir: Path) -> Dict[str, Path]:
-    """Create a unique run directory structure per execution."""
     run_id_utc = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_dir = base_dir / "runs" / run_id_utc
     logs_dir = run_dir / "logs"
@@ -562,15 +529,10 @@ def create_run_directories(base_dir: Path) -> Dict[str, Path]:
 
 
 def init_i2c_bus() -> busio.I2C:
-    """Initialize the Raspberry Pi I2C bus (shared by all I2C sensors)."""
     return busio.I2C(board.SCL, board.SDA)
 
 
 def init_sensors(i2c: busio.I2C) -> Dict[str, Any]:
-    """Initialize sensor objects.
-
-    If a sensor fails init, we store None and keep the script running.
-    """
     sensors: Dict[str, Any] = {
         "bme280_sensor": None,
         "ltr390_sensor": None,
@@ -578,25 +540,21 @@ def init_sensors(i2c: busio.I2C) -> Dict[str, Any]:
         "imu_sensor": None,
     }
 
-    # BME280 (temperature/humidity/pressure)
     try:
         sensors["bme280_sensor"] = adafruit_bme280.Adafruit_BME280_I2C(i2c)
     except Exception:
         sensors["bme280_sensor"] = None
 
-    # LTR390 (UV + ambient)
     try:
         sensors["ltr390_sensor"] = adafruit_ltr390.LTR390(i2c)
     except Exception:
         sensors["ltr390_sensor"] = None
 
-    # TSL2591 (lux)
     try:
         sensors["tsl2591_sensor"] = adafruit_tsl2591.TSL2591(i2c)
     except Exception:
         sensors["tsl2591_sensor"] = None
 
-    # ICM20948 IMU (accel/gyro)
     try:
         sensors["imu_sensor"] = ICM20948(i2c)
     except Exception:
@@ -606,11 +564,6 @@ def init_sensors(i2c: busio.I2C) -> Dict[str, Any]:
 
 
 def read_sensors(sensors: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str]]:
-    """Read sensor values into a nested dict.
-
-    Returns:
-      (data, errors)
-    """
     data: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
 
@@ -619,7 +572,6 @@ def read_sensors(sensors: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str
     tsl2591_sensor = sensors.get("tsl2591_sensor")
     imu_sensor = sensors.get("imu_sensor")
 
-    # Environment (BME280)
     if bme280_sensor is not None:
         try:
             data["environment"] = {
@@ -630,7 +582,6 @@ def read_sensors(sensors: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str
         except Exception as e:
             errors["bme280"] = repr(e)
 
-    # UV / ambient (LTR390)
     if ltr390_sensor is not None:
         try:
             data["uv_light"] = {
@@ -640,7 +591,6 @@ def read_sensors(sensors: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str
         except Exception as e:
             errors["ltr390"] = repr(e)
 
-    # Lux (TSL2591)
     if tsl2591_sensor is not None:
         try:
             data["light"] = {
@@ -651,7 +601,6 @@ def read_sensors(sensors: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str
         except Exception as e:
             errors["tsl2591"] = repr(e)
 
-    # IMU (ICM20948)
     if imu_sensor is not None:
         try:
             accel_x, accel_y, accel_z = imu_sensor.acceleration
@@ -670,36 +619,26 @@ def read_sensors(sensors: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str
 # --------------------------------------------------------------------------------------------------
 
 def main() -> None:
-    """Main telemetry loop."""
-
     telemetry_hz = 1.0
-
-    # Base folder for all runs (portable: works on any user/machine)
     base_dir = Path(__file__).resolve().parent
 
-
-    # Storage caps (MB)
     max_log_mb = 200
     max_image_mb = 500
 
-    # Create a new run folder for this execution
     dirs = create_run_directories(base_dir)
     logs_dir = dirs["logs_dir"]
     images_dir = dirs["images_dir"]
     telemetry_log_path = logs_dir / "telemetry.jsonl"
 
-    # Hardware initialization (done once)
     i2c = init_i2c_bus()
     sensors = init_sensors(i2c)
 
-    # UPS bus init: if it fails, we keep running but battery fields will be empty.
     ups_bus: SMBus | None
     try:
         ups_bus = SMBus(1)
     except Exception:
         ups_bus = None
 
-    # LoRa init: if it fails, we keep running but radio tx will be disabled.
     lora, lora_err = init_lora_radio()
     if lora_err:
         print(f"LoRa init error: {lora_err}")
@@ -714,13 +653,11 @@ def main() -> None:
             now_time_s = loop_start_time_s
             sequence_id += 1
 
-            # A full telemetry record (for local JSONL storage)
             record: Dict[str, Any] = {
                 "timestamp_utc": utc_timestamp_iso(),
                 "sequence_id": sequence_id,
             }
 
-            # Always include an image object so logs have consistent schema.
             record["image"] = {
                 "captured": False,
                 "seq": None,
@@ -729,14 +666,12 @@ def main() -> None:
                 "error": None,
             }
 
-            # ---- Sensors ----
             sensor_data, sensor_errors = read_sensors(sensors)
             record.update(sensor_data)
             if sensor_errors:
                 record.setdefault("errors", {})
                 record["errors"].update(sensor_errors)
 
-            # ---- UPS Power ----
             if ups_bus is not None:
                 power_status, ups_err = read_ups_status(ups_bus)
             else:
@@ -748,7 +683,6 @@ def main() -> None:
                 record.setdefault("errors", {})
                 record["errors"]["ups"] = ups_err
 
-            # ---- Pi Health ----
             pi_health, pi_errs = read_pi_health_status(base_dir)
             record["pi_health"] = pi_health
             if pi_errs:
@@ -756,7 +690,6 @@ def main() -> None:
                 for k, v in pi_errs.items():
                     record["errors"][f"pi_{k}"] = v
 
-            # ---- Camera (rate controlled; slow down if battery critical) ----
             image_period_s = 60 if "BATT_CRIT_PCT" in record.get("alerts", []) else IMAGE_PERIOD_S
             if (now_time_s - last_image_time_s) >= image_period_s:
                 image_info, img_err = capture_image_jpeg(images_dir, sequence_id)
@@ -803,11 +736,9 @@ def main() -> None:
                 f"bat={batt_v}V {batt_pct}% img={img_cap} radio_ok={tx_ok} errors={error_keys}"
             )
 
-            # ---- Pace loop ----
             sleep_to_rate(loop_start_time_s, telemetry_hz)
 
     finally:
-        # Close the UPS bus cleanly
         try:
             if ups_bus is not None:
                 ups_bus.close()
@@ -817,3 +748,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

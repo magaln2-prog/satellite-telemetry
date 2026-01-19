@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-Ground receiver for flight telemetry.
+Ground receiver for TM-framed flight telemetry.
 
-Responsibilities:
-- Receive raw LoRa UART bursts via sx126x.recv_packet()
-- Strip radio header + optional RSSI via sx126x.parse_packet()
-- Reassemble newline-delimited JSON records
-- Write:
-    - latest.json (most recent record)  [atomic]
-    - logs/history.jsonl (append-only)
+This decodes the "TM framed fragments" sent by flight:
+- Each LoRa/UART burst contains one or more TM frames
+- TM frames include: msg_id, frag_idx, frag_tot, crc16
+- Ground reassembles all fragments for a msg_id, then JSON-decodes once.
 
-Reliability:
-- Atomic writes to latest.json (never partial/empty reads)
-- Initializes latest.json with a valid JSON object at startup
-- Emits NO CONTACT heartbeat if no packets arrive (keeps UI alive)
-- Demo mode if sx126x isn't available
+Writes:
+- latest.json (atomic)
+- logs/history.jsonl (append-only, only after successful decode)
+
+Also writes NO CONTACT heartbeat when no *decoded* telemetry arrives.
 """
 
 import json
@@ -22,20 +19,18 @@ import time
 from pathlib import Path
 from datetime import datetime, timezone
 
-# ------------------------------------------------------------
-# Try to import radio driver; allow demo mode if unavailable
-# ------------------------------------------------------------
 try:
-    import sx126x  # type: ignore
+    import sx126x  # your radio driver
     HAVE_RADIO = True
 except Exception:
-    sx126x = None  # type: ignore
+    sx126x = None
     HAVE_RADIO = False
 
+from protocol_tm import try_parse_one
 
-# ============================================================
-# Configuration (MATCHES FLIGHT SETTINGS)
-# ============================================================
+# ----------------------------
+# RADIO CONFIG (must match flight)
+# ----------------------------
 LORA_PORT = "/dev/serial0"
 LORA_FREQ_MHZ = 915
 LORA_ADDR = 1
@@ -47,99 +42,62 @@ LORA_AIR_SPEED = 2400
 
 RX_TIMEOUT_S = 0.5
 
-# Heartbeat (keeps UI alive even without packets)
+# Heartbeat behavior
 NO_CONTACT_AFTER_S = 2.0
 HEARTBEAT_EVERY_S = 1.0
 
+# Reassembly behavior
+REASSEMBLY_TTL_S = 3.0  # drop incomplete messages after this
 
-# ============================================================
-# File locations (LOCAL TO THIS SCRIPT)
-# ============================================================
+
+# ----------------------------
+# FILES
+# ----------------------------
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
-
 LATEST_PATH = BASE_DIR / "latest.json"
 HISTORY_PATH = LOG_DIR / "history.jsonl"
-
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ============================================================
-# Utility helpers
-# ============================================================
-def utc_now_iso() -> str:
+def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def atomic_write_json(path: Path, obj: dict) -> None:
-    """
-    Write JSON atomically to avoid partial/empty reads.
-    IMPORTANT: never open(path, 'w') directly for latest.json.
-    """
-    tmp = path.parent / (path.name + ".tmp")
-    tmp.write_text(
-        json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n",
-        encoding="utf-8"
-    )
+def atomic_write_json(path: Path, obj: dict):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(path)
 
 
-def append_history(obj: dict) -> None:
+def append_history(obj: dict):
     with open(HISTORY_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n")
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
-def ensure_latest_initialized() -> None:
-    if (not LATEST_PATH.exists()) or LATEST_PATH.stat().st_size == 0:
-        init_obj = {
-            "status": "NO DATA YET",
-            "_rx_utc": utc_now_iso(),
-            "_radio": None,
-        }
-        atomic_write_json(LATEST_PATH, init_obj)
+def ensure_latest():
+    if not LATEST_PATH.exists() or LATEST_PATH.stat().st_size == 0:
+        atomic_write_json(LATEST_PATH, {"status": "NO DATA YET", "_rx_utc": utc_now(), "_radio": None})
 
 
-# ============================================================
-# Demo mode (no sx126x / no hardware)
-# ============================================================
-def demo_loop() -> None:
-    print("sx126x not available -> DEMO mode (no radio).")
-    print("Writing heartbeat updates to latest.json so the UI can update.\n")
-
-    ensure_latest_initialized()
-    last_write = 0.0
+def demo_loop():
+    print("sx126x not available -> DEMO mode.")
     seq = 0
-
     while True:
-        now = time.time()
-        if now - last_write >= HEARTBEAT_EVERY_S:
-            seq += 1
-            demo = {
-                "status": "DEMO / NO RADIO",
-                "seq": seq,
-                "_rx_utc": utc_now_iso(),
-                "_radio": None,
-            }
-            atomic_write_json(LATEST_PATH, demo)
-            last_write = now
-            print(f"DEMO heartbeat seq={seq}")
-
-        time.sleep(0.05)
+        seq += 1
+        atomic_write_json(LATEST_PATH, {"status": "DEMO / NO RADIO", "seq": seq, "_rx_utc": utc_now(), "_radio": None})
+        time.sleep(1)
 
 
-# ============================================================
-# Main RX logic
-# ============================================================
-def main() -> None:
-    ensure_latest_initialized()
+def main():
+    ensure_latest()
 
     if not HAVE_RADIO:
         demo_loop()
         return
 
-    print("Starting LoRa RX…")
+    print("Starting LoRa RX (TM-framed)…")
 
-    # Create driver instance (matches sx126x.py __init__)
     lora = sx126x.sx126x(
         serial_num=LORA_PORT,
         freq=LORA_FREQ_MHZ,
@@ -154,83 +112,120 @@ def main() -> None:
         wor=False,
     )
 
-    # Buffer for newline-delimited JSON reassembly
-    rx_buf = b""
+    # Stream buffer: holds raw payload bytes extracted from radio frames
+    stream = b""
 
-    print("RX started. Waiting for packets…")
+    # Reassembly: msg_id -> {"t0": float, "tot": int, "parts": {idx: bytes}}
+    pending = {}
 
-    last_packet_time = 0.0
-    last_heartbeat_write = 0.0
+    last_uart_packet_time = 0.0
+    last_decoded_time = 0.0
+    last_heartbeat = 0.0
     last_good_rx_utc = None
 
-    bad_json = 0
+    print("RX running… waiting for TM frames.")
 
     while True:
-        # 1) Read a burst of bytes from UART (may be partial)
         pkt = lora.recv_packet(timeout_s=RX_TIMEOUT_S)
         now = time.time()
 
-        # 1b) Heartbeat if no packet
+        # Expire stale partial messages
+        for mid in list(pending.keys()):
+            if now - pending[mid]["t0"] > REASSEMBLY_TTL_S:
+                del pending[mid]
+
+        # No UART packet received
         if not pkt:
-            time_since_pkt = (now - last_packet_time) if last_packet_time > 0 else 9999.0
-            if time_since_pkt >= NO_CONTACT_AFTER_S and (now - last_heartbeat_write) >= HEARTBEAT_EVERY_S:
-                heartbeat = {
+            # Heartbeat: only if we haven't decoded a full telemetry record recently
+            if (now - last_decoded_time) >= NO_CONTACT_AFTER_S and (now - last_heartbeat) >= HEARTBEAT_EVERY_S:
+                atomic_write_json(LATEST_PATH, {
                     "status": "NO CONTACT",
-                    "_rx_utc": utc_now_iso(),
+                    "_rx_utc": utc_now(),
                     "last_good_rx_utc": last_good_rx_utc,
                     "_radio": None,
-                }
-                atomic_write_json(LATEST_PATH, heartbeat)
-                last_heartbeat_write = now
+                })
+                last_heartbeat = now
             continue
 
-        last_packet_time = now
+        last_uart_packet_time = now
 
-        # 2) Strip header / RSSI, get payload bytes
-        meta, payload = lora.parse_packet(pkt)
-        if not payload:
+        # Normalize raw bytes
+        raw = pkt
+        if isinstance(raw, (tuple, list)) and raw:
+            raw = raw[0]
+        if not isinstance(raw, (bytes, bytearray)):
+            raw = bytes(raw)
+
+        # Extract payload bytes from driver if possible; otherwise fall back to raw.
+        meta = {}
+        payload = b""
+        try:
+            meta, payload = lora.parse_packet(raw)
+            if payload is None:
+                payload = b""
+        except Exception:
+            meta, payload = {}, b""
+
+        # IMPORTANT: Some drivers/headers can be inconsistent.
+        # We'll feed whichever contains the TM magic most reliably.
+        # (Parser resyncs on MAGIC anyway.)
+        chunk = payload if payload else raw
+        if not chunk:
             continue
 
-        # 3) Append payload to reassembly buffer
-        rx_buf += payload
+        # Append to stream and parse as many TM frames as possible
+        stream += chunk
 
-        # 4) Extract complete JSON lines
-        while b"\n" in rx_buf:
-            line, rx_buf = rx_buf.split(b"\n", 1)
+        while True:
+            frame, rest = try_parse_one(stream)
+            if frame is None:
+                stream = rest
+                break
 
-            if not line.strip():
-                continue
+            stream = rest
+            msg_id = frame["msg_id"]
+            frag_idx = frame["frag_idx"]
+            frag_tot = frame["frag_tot"]
+            frag_payload = frame["payload"]
 
-            try:
-                record = json.loads(line.decode("utf-8"))
-            except Exception:
-                bad_json += 1
-                if bad_json % 50 == 0:
-                    print(f"warning: dropped {bad_json} bad JSON lines")
-                continue
+            st = pending.get(msg_id)
+            if st is None:
+                st = {"t0": now, "tot": frag_tot, "parts": {}}
+                pending[msg_id] = st
 
-            # 5) Annotate record with RX info
-            rx_utc = utc_now_iso()
-            record["_rx_utc"] = rx_utc
-            record["_radio"] = {
-                "src_addr": meta.get("src_addr"),
-                "freq_mhz": meta.get("freq_mhz"),
-                "raw_len": meta.get("raw_len"),
-                "packet_rssi_dbm": meta.get("packet_rssi_dbm"),
-            }
+            # If total changes, reset that message id
+            if st["tot"] != frag_tot:
+                st = {"t0": now, "tot": frag_tot, "parts": {}}
+                pending[msg_id] = st
 
-            # 6) Write latest.json (atomic) + append history
-            atomic_write_json(LATEST_PATH, record)
-            append_history(record)
+            st["parts"][frag_idx] = frag_payload
 
-            last_good_rx_utc = rx_utc
-            last_heartbeat_write = now  # reset heartbeat timer since we got real data
+            # Complete?
+            if len(st["parts"]) == st["tot"]:
+                full = b"".join(st["parts"][i] for i in range(st["tot"]))
+                del pending[msg_id]
 
-            # 7) Console feedback
-            print(
-                f"RX OK seq={record.get('seq')} ts={record.get('ts')} "
-                f"rssi={meta.get('packet_rssi_dbm')}dBm src={meta.get('src_addr')}"
-            )
+                try:
+                    record = json.loads(full.decode("utf-8"))
+                except Exception:
+                    # Bad JSON shouldn't kill the loop
+                    continue
+
+                record["_rx_utc"] = utc_now()
+                record["_radio"] = meta or None
+
+                atomic_write_json(LATEST_PATH, record)
+                append_history(record)
+
+                last_good_rx_utc = record["_rx_utc"]
+                last_decoded_time = now
+                last_heartbeat = now
+
+                print(
+                    f"RX OK msg_id={msg_id} seq={record.get('seq')} "
+                    f"rssi={meta.get('packet_rssi_dbm') if meta else None} "
+                    f"frags={frag_tot}"
+                )
 
 
 if __name__ == "__main__":
