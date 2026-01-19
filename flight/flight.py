@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
+"""
+flight.py
 
-"""flight.py
+Flight-side telemetry script.
 
-Flight-side telemetry script (Raspberry Pi payload).
-
-What this script does (high-level):
-  1) Reads sensors (BME280, LTR390, TSL2591, ICM20948) over I2C.
-  2) Reads UPS battery status over I2C (Waveshare UPS HAT E).
-  3) Optionally captures a JPEG using rpicam-still (stores *metadata* only).
-  4) Builds TWO telemetry records:
-       - A full record written locally as JSONL (one JSON per line).
-       - A compact record sent over LoRa USING FRAMED FRAGMENTS (reliable).
-  5) Runs forever at a fixed telemetry rate without busy-waiting.
-
-Why framed fragments?
-  - LoRa/UART links fragment, drop, and occasionally corrupt bytes.
-  - Newline-delimited JSON is fragile (partial JSON breaks ground parsing).
-  - A framed protocol makes reassembly deterministic and reliable.
+Main idea:
+- Build a full record locally and log it (JSONL).
+- Build a compact packet for radio.
+- Send compact packet using TM-framed fragments (robust against fragmentation).
 """
 
 # -------------------------
@@ -44,14 +35,17 @@ from adafruit_icm20x import ICM20948
 # UPS power monitoring
 from smbus2 import SMBus
 
-# LoRa driver (patched to be telemetry-safe)
+# LoRa driver
 import sx126x
+
+# Shared telemetry protocol (MUST match ground exactly)
+from protocol_tm import build_frame as _tm_build_frame, HDR_LEN as _TM_HDR_LEN
+
 
 # -------------------------
 # UPS (Waveshare UPS HAT E) constants
 # -------------------------
 UPS_I2C_ADDR = 0x2D
-
 LOW_BATT_PCT = 20
 CRIT_BATT_PCT = 10
 LOW_BATT_V = 3.55
@@ -77,27 +71,27 @@ LORA_NET_ID = 0
 LORA_CRYPT = 0
 LORA_RSSI = True
 
-# Module's maximum UART packet size
+# Module UART buffer size
 LORA_BUFFER_SIZE = 240
 
 # TX behavior
 LORA_TX_RETRIES = 3
-LORA_TX_GAP_S = 0.20  # slightly faster now that we send multiple fragments
+LORA_TX_GAP_S = 0.20
 
 # For 900MHz modules: offset = freq_mhz - 850
 LORA_BASE_FREQ_MHZ = 850
 
+
 # --------------------------------------------------------------------------------------------------
 # Time helpers
 # --------------------------------------------------------------------------------------------------
-
 def utc_timestamp_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
 
 # --------------------------------------------------------------------------------------------------
 # Local logging (JSONL)
 # --------------------------------------------------------------------------------------------------
-
 def append_jsonl_safe(path: Path, record: Dict[str, Any]) -> str | None:
     try:
         with path.open("a", encoding="utf-8") as f:
@@ -106,19 +100,19 @@ def append_jsonl_safe(path: Path, record: Dict[str, Any]) -> str | None:
     except Exception as e:
         return repr(e)
 
+
 # --------------------------------------------------------------------------------------------------
 # Loop pacing (avoid overheating / busy-wait)
 # --------------------------------------------------------------------------------------------------
-
 def sleep_to_rate(loop_start_time_s: float, telemetry_hz: float) -> None:
     period_s = 1.0 / telemetry_hz
     elapsed_s = time.time() - loop_start_time_s
     time.sleep(max(0.0, period_s - elapsed_s))
 
+
 # --------------------------------------------------------------------------------------------------
 # Storage cleanup
 # --------------------------------------------------------------------------------------------------
-
 def cleanup_folder_to_mb(folder: Path, max_mb: int) -> int:
     if not folder.exists():
         return 0
@@ -145,10 +139,10 @@ def cleanup_folder_to_mb(folder: Path, max_mb: int) -> int:
 
     return deleted
 
+
 # --------------------------------------------------------------------------------------------------
 # UPS helpers
 # --------------------------------------------------------------------------------------------------
-
 def ups_read_u16(ups_bus: SMBus, reg: int) -> int:
     lo = ups_bus.read_byte_data(UPS_I2C_ADDR, reg)
     hi = ups_bus.read_byte_data(UPS_I2C_ADDR, reg + 1)
@@ -196,10 +190,10 @@ def compute_battery_alerts(power_status: Dict[str, Any]) -> list[str]:
 
     return alerts
 
+
 # --------------------------------------------------------------------------------------------------
 # Pi health helpers
 # --------------------------------------------------------------------------------------------------
-
 def _run_cmd(cmd: list[str]) -> tuple[str, str | None]:
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
@@ -315,10 +309,10 @@ def read_pi_health_status(data_root: Path) -> tuple[Dict[str, Any], Dict[str, st
 
     return health, errors
 
+
 # --------------------------------------------------------------------------------------------------
 # Camera capture
 # --------------------------------------------------------------------------------------------------
-
 def capture_image_jpeg(images_dir: Path, sequence_id: int) -> tuple[Dict[str, Any], str | None]:
     try:
         images_dir.mkdir(parents=True, exist_ok=True)
@@ -346,10 +340,10 @@ def capture_image_jpeg(images_dir: Path, sequence_id: int) -> tuple[Dict[str, An
     except Exception as e:
         return {}, repr(e)
 
+
 # --------------------------------------------------------------------------------------------------
 # LoRa helpers
 # --------------------------------------------------------------------------------------------------
-
 def init_lora_radio() -> tuple[Any | None, str | None]:
     try:
         lora = sx126x.sx126x(
@@ -386,37 +380,10 @@ def build_fixed_frame(dest_addr: int, payload: bytes) -> bytes:
         freq_off & 0xFF,
     ]) + payload
 
-# --------------------------------------------------------------------------------------------------
-# Telemetry framing protocol (inline, so you only edit ONE file on flight)
-# --------------------------------------------------------------------------------------------------
-
-import struct
-
-_TM_MAGIC = b"TM"
-_TM_VER = 1
-_TM_HDR_FMT = ">2sB H B B B H"  # MAGIC, VER, MSG_ID, IDX, TOT, LEN, CRC16
-_TM_HDR_LEN = struct.calcsize(_TM_HDR_FMT)
-
-def _crc16_ccitt(data: bytes, poly: int = 0x1021, init: int = 0xFFFF) -> int:
-    crc = init
-    for b in data:
-        crc ^= (b << 8)
-        for _ in range(8):
-            crc = ((crc << 1) ^ poly) if (crc & 0x8000) else (crc << 1)
-            crc &= 0xFFFF
-    return crc
-
-def _tm_build_frame(msg_id: int, frag_idx: int, frag_tot: int, payload: bytes) -> bytes:
-    if len(payload) > 255:
-        raise ValueError("TM payload too long (len>255)")
-    header_wo_crc = struct.pack(">B H B B B", _TM_VER, msg_id & 0xFFFF, frag_idx, frag_tot, len(payload))
-    crc = _crc16_ccitt(header_wo_crc + payload)
-    return struct.pack(_TM_HDR_FMT, _TM_MAGIC, _TM_VER, msg_id & 0xFFFF, frag_idx, frag_tot, len(payload), crc) + payload
 
 # --------------------------------------------------------------------------------------------------
-# Compact packet build + TX (FRAMED FRAGMENTS)
+# Compact packet build + TX (TM FRAMED FRAGMENTS)
 # --------------------------------------------------------------------------------------------------
-
 def build_compact_radio_packet(record: Dict[str, Any]) -> Dict[str, Any]:
     env = record.get("environment", {}) or {}
     power = record.get("power", {}) or {}
@@ -441,47 +408,47 @@ def build_compact_radio_packet(record: Dict[str, Any]) -> Dict[str, Any]:
 
 def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Send compact telemetry over LoRa using FRAMED FRAGMENTS.
-
-    - No newline JSON streaming.
-    - Ground reassembles msg_id + fragments, verifies CRC, then decodes JSON.
+    Send compact telemetry over LoRa using TM-framed fragments.
+    Uses shared protocol_tm.py (must match ground exactly).
     """
     if lora is None:
         return {"enabled": False, "tx_success": False, "tx_error": "lora_none"}
 
-    # Encode ONCE (compact JSON bytes)
     blob = json.dumps(packet, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
     # Reserve 3 bytes for fixed-address header [DEST_H][DEST_L][FREQ_OFF]
     max_app = lora.max_app_payload_bytes(header_len=3)
 
-    # Each fragment also needs the TM header
     max_chunk = max_app - _TM_HDR_LEN
     if max_chunk <= 0:
-        return {"enabled": True, "tx_success": False, "tx_error": "buffer_too_small", "max_app": max_app}
+        return {
+            "enabled": True,
+            "tx_success": False,
+            "tx_error": "buffer_too_small_for_tm",
+            "max_app": max_app,
+        }
 
-    # Fragment
     chunks = [blob[i:i + max_chunk] for i in range(0, len(blob), max_chunk)]
     frag_tot = len(chunks)
     msg_id = int(packet.get("seq") or 0) & 0xFFFF
 
     sent = 0
-    last_err: str | None = None
+    last_err = None
 
     for frag_idx, chunk in enumerate(chunks):
         try:
             tm_payload = _tm_build_frame(msg_id, frag_idx, frag_tot, chunk)
         except Exception as e:
-            return {"enabled": True, "tx_success": False, "tx_error": f"tm_build:{repr(e)}"}
+            return {"enabled": True, "tx_success": False, "tx_error": f"tm_build_failed:{e}"}
 
         frame = build_fixed_frame(LORA_DEST_ADDR, tm_payload)
 
         ok = False
-        for attempt in range(1, LORA_TX_RETRIES + 1):
+        for _ in range(LORA_TX_RETRIES):
             try:
                 lora.send(frame)
-                ok = True
                 sent += 1
+                ok = True
                 time.sleep(LORA_TX_GAP_S)
                 break
             except Exception as e:
@@ -496,9 +463,6 @@ def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, An
                 "msg_id": msg_id,
                 "frags_total": frag_tot,
                 "frags_sent": sent,
-                "bytes": len(blob),
-                "max_app": max_app,
-                "max_chunk": max_chunk,
             }
 
     return {
@@ -508,14 +472,13 @@ def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, An
         "frags_total": frag_tot,
         "frags_sent": sent,
         "bytes": len(blob),
-        "max_app": max_app,
         "max_chunk": max_chunk,
     }
+
 
 # --------------------------------------------------------------------------------------------------
 # Sensor initialization + reading
 # --------------------------------------------------------------------------------------------------
-
 def create_run_directories(base_dir: Path) -> Dict[str, Path]:
     run_id_utc = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_dir = base_dir / "runs" / run_id_utc
@@ -614,10 +577,10 @@ def read_sensors(sensors: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str
 
     return data, errors
 
+
 # --------------------------------------------------------------------------------------------------
 # Main loop
 # --------------------------------------------------------------------------------------------------
-
 def main() -> None:
     telemetry_hz = 1.0
     base_dir = Path(__file__).resolve().parent
@@ -633,7 +596,6 @@ def main() -> None:
     i2c = init_i2c_bus()
     sensors = init_sensors(i2c)
 
-    ups_bus: SMBus | None
     try:
         ups_bus = SMBus(1)
     except Exception:
@@ -712,7 +674,7 @@ def main() -> None:
             radio_packet = build_compact_radio_packet(record)
             record["radio"] = send_compact_radio_packet(lora, radio_packet)
 
-            # ---- JSONL log (fail-safe) ----
+            # ---- JSONL log ----
             log_error = append_jsonl_safe(telemetry_log_path, record)
             if log_error:
                 record.setdefault("errors", {})
@@ -733,7 +695,8 @@ def main() -> None:
 
             print(
                 f"seq={sequence_id} time={record['timestamp_utc']} "
-                f"bat={batt_v}V {batt_pct}% img={img_cap} radio_ok={tx_ok} errors={error_keys}"
+                f"bat={batt_v}V {batt_pct}% img={img_cap} "
+                f"radio_ok={tx_ok} errors={error_keys}"
             )
 
             sleep_to_rate(loop_start_time_s, telemetry_hz)
@@ -748,4 +711,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
