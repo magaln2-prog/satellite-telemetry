@@ -1,172 +1,173 @@
 #!/usr/bin/env python3
-"""rx_to_latest.py
+"""
+rx_to_latest.py
 
-Ground-side receiver that matches your **new flight script**.
+GROUND RECEIVER SCRIPT
 
+Responsibilities:
+- Receive LoRa packets via sx126x driver
+- Extract application payload bytes
+- Reassemble newline-delimited JSON messages
+- Write:
+    - latest.json  (for dashboard)
+    - history.jsonl (append-only log)
+
+This script MUST be robust to:
+- partial packets
+- packet concatenation
+- dropped packets
 """
 
-from __future__ import annotations
-
 import json
-import os
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
 
 import sx126x
 
-# ------------------------------
-# Ground LoRa config
-# ------------------------------
-LORA_PORT = "/dev/serial0"
-LORA_FREQ_MHZ = 915
-LORA_ADDR = 0xFFFF  # common for RX in fixed mode
-LORA_POWER_DBM = 22
-LORA_AIR_SPEED = 2400
-LORA_NET_ID = 0
-LORA_CRYPT = 0
-LORA_RSSI = True
-LORA_BUFFER_SIZE = 240  # driver supports {240,128,64,32}
+# =========================
+# Configuration
+# =========================
 
-# ------------------------------
-# Files
-# ------------------------------
-BASE_DIR = Path(__file__).resolve().parent
-OUT_FILE = BASE_DIR / "latest.json"
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-HISTORY_FILE = LOG_DIR / "history.jsonl"
-RAW_LOG_FILE = LOG_DIR / "rx_raw.log"
+DATA_ROOT = Path("/home/pi/ground")
+LOG_DIR = DATA_ROOT / "logs"
 
-# If we haven't received anything in this many seconds, dashboard can treat as "no contact".
-NO_CONTACT_S = 10.0
+LATEST_PATH = DATA_ROOT / "latest.json"
+HISTORY_PATH = LOG_DIR / "history.jsonl"
 
-#function that returns time
-def now_iso() -> str:
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# RX safety limits
+MAX_RX_BUFFER = 8192   # prevent runaway memory if stream corrupts
+
+# =========================
+# Utility helpers
+# =========================
+
+def utc_now_iso() -> str:
+    """UTC timestamp for receive-side metadata."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def atomic_write(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
-@dataclass
-class ReassemblyState:
-    buf: bytes = b""
-
-
-def split_lines(state: ReassemblyState, chunk: bytes, max_buf: int = 8192) -> List[bytes]:
-    if not chunk:
-        return []
-
-    state.buf += chunk
-
-    # Safety cap: if framing is lost, don't let memory grow forever.
-    if len(state.buf) > max_buf:
-        state.buf = state.buf[-1024:]
-
-    lines: List[bytes] = []
-    while b"\n" in state.buf:
-        line, state.buf = state.buf.split(b"\n", 1)
-        line = line.strip()
-        if line:
-            lines.append(line)
-    return lines
-
-
-def maybe_strip_to_json(line: bytes) -> bytes:
-    """If extra non-JSON header bytes sneak in, strip to first '{'.
-
-    This makes the ground side tolerant during transitions.
+def atomic_write_json(path: Path, obj: dict) -> None:
     """
-    if not line:
-        return line
-    if line[:1] == b"{":
-        return line
-    i = line.find(b"{")
-    if i >= 0:
-        return line[i:]
-    return line
+    Write JSON atomically:
+    - write to temp file
+    - rename over target
+
+    Prevents dashboard from ever seeing partial JSON.
+    """
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(obj, f, separators=(",", ":"), ensure_ascii=False)
+    tmp.replace(path)
 
 
-def log_raw(reason: str, payload: bytes, meta: Optional[dict] = None) -> None:
-    meta_str = "" if not meta else f" meta={meta}"
-    with RAW_LOG_FILE.open("a", encoding="utf-8", buffering=1) as f:
-        f.write(f"{now_iso()} | {reason}{meta_str} | {payload!r}\n")
+def append_jsonl(path: Path, obj: dict) -> None:
+    """Append one JSON object as a JSONL line."""
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n")
 
+
+# =========================
+# Main receiver
+# =========================
 
 def main() -> None:
-    print("=== RX -> latest.json (newline reassembly) ===")
-    print(f"Port={LORA_PORT} freq={LORA_FREQ_MHZ} addr={LORA_ADDR} buffer={LORA_BUFFER_SIZE} rssi={LORA_RSSI}")
+    """
+    Main RX loop.
 
+    Key idea:
+    - LoRa delivers *bytes*, not messages
+    - We buffer bytes until we see '\\n'
+    - Each '\\n' marks one complete JSON object
+    """
+
+    # Initialize LoRa radio
     lora = sx126x.sx126x(
-        serial_num=LORA_PORT,
-        freq=LORA_FREQ_MHZ,
-        addr=LORA_ADDR,
-        power=LORA_POWER_DBM,
-        rssi=LORA_RSSI,
-        air_speed=LORA_AIR_SPEED,
-        net_id=LORA_NET_ID,
-        buffer_size=LORA_BUFFER_SIZE,
-        crypt=LORA_CRYPT,
+        serial_num="/dev/serial0",
+        freq=915,
+        addr=1,
+        power=22,
+        rssi=True,
+        buffer_size=240,
+        crypt=0,
         relay=False,
         lbt=False,
         wor=False,
     )
 
-    states: Dict[int, ReassemblyState] = {}
-    last_rx_time_s = 0.0
+    # RX reassembly buffer (bytes)
+    rx_buf = b""
+
+    print("RX started, waiting for packets...")
 
     while True:
+        # --------------------------------------------------
+        # Step 1: Receive a raw radio packet
+        # --------------------------------------------------
         pkt = lora.recv_packet(timeout_s=0.5)
         if not pkt:
-            # optional: write a heartbeat "no contact" marker without overwriting last good data
-            if last_rx_time_s and (time.time() - last_rx_time_s) > NO_CONTACT_S:
-                # dashboard can also compute stale from _rx_ts; we keep this minimal.
-                pass
-            time.sleep(0.01)
             continue
 
+        # --------------------------------------------------
+        # Step 2: Parse radio packet
+        #   meta   → RSSI, src addr, etc.
+        #   payload → application bytes (may be partial JSON)
+        # --------------------------------------------------
         meta, payload = lora.parse_packet(pkt)
+
         if not payload:
             continue
 
-        src = int(meta.get("src_addr", 0)) if isinstance(meta, dict) else 0
-        state = states.setdefault(src, ReassemblyState())
+        # --------------------------------------------------
+        # Step 3: Append payload to reassembly buffer
+        # --------------------------------------------------
+        rx_buf += payload
 
-        for raw_line in split_lines(state, payload):
-            line = maybe_strip_to_json(raw_line)
-            try:
-                obj = json.loads(line.decode("utf-8"))
-            except Exception as e:
-                log_raw(f"json_decode_error: {e}", raw_line, meta)
+        # Safety: drop buffer if stream goes insane
+        if len(rx_buf) > MAX_RX_BUFFER:
+            rx_buf = b""
+            continue
+
+        # --------------------------------------------------
+        # Step 4: Extract complete JSON lines
+        # --------------------------------------------------
+        while b"\n" in rx_buf:
+            line, rx_buf = rx_buf.split(b"\n", 1)
+            line = line.strip()
+
+            if not line:
                 continue
 
-            last_rx_time_s = time.time()
+            # --------------------------------------------------
+            # Step 5: Parse JSON (finally safe)
+            # --------------------------------------------------
+            try:
+                msg = json.loads(line.decode("utf-8"))
+            except json.JSONDecodeError:
+                # Corrupted line → drop it
+                continue
 
-            # Stamp receive time + radio meta
-            obj["_rx_ts"] = now_iso()
-            obj["_radio"] = meta or {}
-            obj["_stale_s"] = 0.0
+            # --------------------------------------------------
+            # Step 6: Add RX-side metadata
+            # --------------------------------------------------
+            msg["_rx_utc"] = utc_now_iso()
 
-            # Write latest.json (atomic)
-            atomic_write(OUT_FILE, json.dumps(obj, indent=2, ensure_ascii=False))
+            if meta:
+                msg["_radio"] = meta
 
-            # Append history
-            with HISTORY_FILE.open("a", encoding="utf-8", buffering=1) as hf:
-                hf.write(json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n")
+            # --------------------------------------------------
+            # Step 7: Write outputs
+            # --------------------------------------------------
+            atomic_write_json(LATEST_PATH, msg)
+            append_jsonl(HISTORY_PATH, msg)
 
-            # Print compact status
-            ts = obj.get("ts") or obj.get("timestamp_utc") or obj.get("_rx_ts")
-            seq = obj.get("seq") or obj.get("sequence_id")
-            print(f"RX src={src} seq={seq} ts={ts}")
+            # Optional console feedback
+            seq = msg.get("seq")
+            print(f"RX OK seq={seq}")
+
+        # loop continues forever
 
 
 if __name__ == "__main__":
