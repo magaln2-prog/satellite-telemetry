@@ -326,89 +326,37 @@
   <script>
     const $ = (id) => document.getElementById(id);
 
+    function toEpochSeconds(iso) {
+      try { return Date.parse(iso) / 1000; } catch (e) { return null; }
+    }
+
     function fmt(n, digits = 2) {
       if (n === null || n === undefined || Number.isNaN(n)) return "—";
       return Number(n).toFixed(digits);
-    }
-
-    function pickTs(obj) {
-      if (!obj) return "";
-      return obj._rx_utc || obj._rx_ts || obj.ts || obj.timestamp_utc || "";
     }
 
     function isNum(x) {
       return typeof x === "number" && Number.isFinite(x);
     }
 
-    // History filtering: only plot records that look like real telemetry
     function looksLikeTelemetry(r) {
       if (!r || typeof r !== "object") return false;
+      // treat as telemetry if it contains at least one numeric sensor field or seq
       return (
         r.seq !== undefined ||
-        isNum(r.t_c) ||
-        isNum(r.rh) ||
-        isNum(r.p_hpa) ||
-        isNum(r.lux) ||
-        isNum(r.cpu_c) ||
-        isNum(r.bv) ||
-        isNum(r.uvi)
+        isNum(r.t_c) || isNum(r.rh) || isNum(r.p_hpa) ||
+        isNum(r.lux) || isNum(r.cpu_c) || isNum(r.bv) || isNum(r.uvi)
       );
     }
 
     function setAgeBadge(ageSec) {
       const b = $("age_badge");
-      if (ageSec === null || ageSec === undefined) { b.textContent = "—"; b.className = "badge"; return; }
+      if (ageSec === null) { b.textContent = "—"; b.className = "badge"; return; }
       b.textContent = `${ageSec.toFixed(1)}s`;
       b.className = "badge " + (ageSec < 3 ? "good" : (ageSec < 10 ? "warn" : "bad"));
     }
 
-    function updateUI(latest) {
-      if (!latest) return;
-
-      $("run_id").textContent = latest.run_id || (latest.seq ?? latest.sequence_id ?? "—");
-      $("last_ts").textContent = pickTs(latest) || "—";
-
-      $("t_c").innerHTML = `${fmt(latest.t_c, 2)} <small>°C</small>`;
-      $("rh").innerHTML = `${fmt(latest.rh, 1)} <small>%</small>`;
-      $("p_hpa").innerHTML = `${fmt(latest.p_hpa, 2)} <small>hPa</small>`;
-      $("lux").innerHTML = `${fmt(latest.lux, 2)} <small>lx</small>`;
-      $("uvi").textContent = (latest.uvi === undefined ? "—" : fmt(latest.uvi, 2));
-      $("cpu_c").innerHTML = `${fmt(latest.cpu_c, 1)} <small>°C</small>`;
-
-      $("bv").innerHTML = `${fmt(latest.bv, 2)} <small>V</small>`;
-      $("bp").innerHTML = `${latest.bp ?? "—"} <small>%</small>`;
-      $("ba").innerHTML = `${fmt(latest.ba, 2)} <small>A</small>`;
-
-      const rssi = latest?._radio?.packet_rssi_dbm;
-      $("pwr_flags").textContent = (rssi !== undefined && rssi !== null) ? (`RSSI ${rssi} dBm`) : "OK";
-
-      const alerts = Array.isArray(latest.alerts) ? latest.alerts : [];
-      if (alerts.length === 0) {
-        $("alerts_box").className = "ok";
-        $("alerts_box").textContent = "No alerts.";
-      } else {
-        $("alerts_box").className = "alerts";
-        $("alerts_box").innerHTML = alerts.map(a => `<div class="alert">${a}</div>`).join("");
-      }
-
-      if (latest.img === 1) {
-        $("img_status").textContent = "Flight reports image capture: YES (flag=1)";
-      } else if (latest.img === 0) {
-        $("img_status").textContent = "No image event (flag=0)";
-      } else {
-        $("img_status").textContent = "—";
-      }
-    }
-
-    function pushSeries(chart, labels, seriesArrays, maxPoints = 300) {
-      chart.data.labels = labels.slice(-maxPoints);
-      for (let i = 0; i < chart.data.datasets.length; i++) {
-        chart.data.datasets[i].data = (seriesArrays[i] || []).slice(-maxPoints);
-      }
-      chart.update();
-    }
-
-    // Charts (same look as your current file)
+    // Charts (UNCHANGED look)
     const envChart = new Chart($("chart_env"), {
       type: "line",
       data: {
@@ -453,26 +401,86 @@
       options: { responsive: true, animation: false, scales: { x: { ticks: { color: "#9aa4ad" } }, y: { ticks: { color: "#9aa4ad" } } }, plugins: { legend: { labels: { color: "#e6e6e6" } } } }
     });
 
+    function updateUI(latest, serverTimeIso = null, latestAgeS = null) {
+      if (!latest) return;
+
+      $("run_id").textContent = latest.run_id || "—";
+      $("last_ts").textContent = latest.ts || latest._rx_utc || "—";
+
+      // Prefer server-calculated age if provided; else compute from ts
+      if (latestAgeS !== null && latestAgeS !== undefined) {
+        setAgeBadge(latestAgeS);
+      } else {
+        const ts = toEpochSeconds(latest.ts);
+        const now = Date.now() / 1000;
+        setAgeBadge(ts ? (now - ts) : null);
+      }
+
+      $("t_c").innerHTML = `${fmt(latest.t_c, 2)} <small>°C</small>`;
+      $("rh").innerHTML = `${fmt(latest.rh, 1)} <small>%</small>`;
+      $("p_hpa").innerHTML = `${fmt(latest.p_hpa, 2)} <small>hPa</small>`;
+      $("lux").innerHTML = `${fmt(latest.lux, 2)} <small>lx</small>`;
+      $("uvi").textContent = (latest.uvi === undefined ? "—" : fmt(latest.uvi, 2));
+      $("cpu_c").innerHTML = `${fmt(latest.cpu_c, 1)} <small>°C</small>`;
+
+      $("bv").innerHTML = `${fmt(latest.bv, 2)} <small>V</small>`;
+      $("bp").innerHTML = `${latest.bp ?? "—"} <small>%</small>`;
+      $("ba").innerHTML = `${fmt(latest.ba, 2)} <small>A</small>`;
+
+      const flags = [];
+      if (latest.uv_now) flags.push("UNDERVOLT");
+      if (latest.thr_now) flags.push("THROTTLED");
+      $("pwr_flags").textContent = flags.length ? flags.join(", ") : "OK";
+
+      const alerts = Array.isArray(latest.alerts) ? latest.alerts : [];
+      if (alerts.length === 0) {
+        $("alerts_box").className = "ok";
+        $("alerts_box").textContent = "No alerts.";
+      } else {
+        $("alerts_box").className = "alerts";
+        $("alerts_box").innerHTML = alerts.map(a => `<div class="alert">${a}</div>`).join("");
+      }
+
+      if (latest.img === 1) {
+        $("img_status").textContent = "Flight reports image capture: YES (flag=1)";
+      } else if (latest.img === 0) {
+        $("img_status").textContent = "No image event (flag=0)";
+      } else {
+        $("img_status").textContent = "—";
+      }
+
+      if (serverTimeIso) $("server_time").textContent = serverTimeIso;
+    }
+
+    function pushSeries(chart, labels, seriesArrays, maxPoints = 300) {
+      chart.data.labels = labels.slice(-maxPoints);
+      for (let i = 0; i < chart.data.datasets.length; i++) {
+        chart.data.datasets[i].data = (seriesArrays[i] || []).slice(-maxPoints);
+      }
+      chart.update();
+    }
+
     async function refresh() {
       try {
-        // Health/contact badge always updates (even during no-contact)
+        // Always update server time + contact age from /api/health
         const health = await fetch("/api/health", { cache: "no-store" }).then(r => r.json());
         $("server_time").textContent = health.server_time || "—";
-        setAgeBadge(health.latest_age_s);
+        setAgeBadge((health.latest_age_s ?? null));
 
-        // Latest telemetry only updates when a full packet was decoded (server-side latch)
+        // /api/latest should be latched server-side to last GOOD telemetry
         const latestRes = await fetch("/api/latest", { cache: "no-store" }).then(r => r.json());
         if (latestRes && latestRes.ok && latestRes.latest) {
-          updateUI(latestRes.latest);
+          updateUI(latestRes.latest, health.server_time || null, health.latest_age_s ?? null);
         }
+        // else: DO NOTHING -> keep showing the last good data on screen.
 
-        // Charts: only plot real telemetry records so status spam doesn't blank charts
-        const histRes = await fetch("/api/history", { cache: "no-store" }).then(r => r.json());
-        const all = histRes.records || [];
-        const recs = all.filter(looksLikeTelemetry);
+        // History for charts (filter out status-only records)
+        const histRes = await fetch("/api/history?n=300", { cache: "no-store" }).then(r => r.json());
+        const raw = histRes.records || [];
+        const recs = raw.filter(looksLikeTelemetry);
 
         if (recs.length > 1) {
-          const labels = recs.map(r => (pickTs(r) || "").slice(11, 19)); // HH:MM:SS
+          const labels = recs.map(r => ((r.ts || r._rx_utc || "")).slice(11, 19));
 
           pushSeries(envChart, labels, [
             recs.map(r => (isNum(r.t_c) ? r.t_c : null)),
@@ -486,23 +494,25 @@
 
           pushSeries(battChart, labels, [
             recs.map(r => (isNum(r.bv) ? r.bv : null)),
-            recs.map(r => (typeof r.bp === "number" ? r.bp : (isNum(r.bp) ? r.bp : null))),
+            recs.map(r => (isNum(r.bp) ? r.bp : (typeof r.bp === "number" ? r.bp : null))),
           ]);
 
+          // Only plot these if your packet includes them; otherwise they stay null (no crashes)
           pushSeries(imuChart, labels, [
             recs.map(r => (isNum(r.acc_mag) ? r.acc_mag : null)),
             recs.map(r => (isNum(r.mag_mag) ? r.mag_mag : null)),
           ]);
         }
       } catch (e) {
+        // If RX/dashboard hiccups, keep page alive and keep last good numbers visible.
         console.log("refresh error:", e);
-        // Do nothing: keep the last shown telemetry on screen.
       }
     }
 
     refresh();
     setInterval(refresh, 1000);
   </script>
+
 </body>
 
 </html>
