@@ -41,7 +41,6 @@ import sx126x
 # Shared telemetry protocol (MUST match ground exactly)
 from protocol_tm import build_frame as _tm_build_frame, HDR_LEN as _TM_HDR_LEN
 
-
 # -------------------------
 # UPS (Waveshare UPS HAT E) constants
 # -------------------------
@@ -419,7 +418,14 @@ def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, An
     # Reserve 3 bytes for fixed-address header [DEST_H][DEST_L][FREQ_OFF]
     max_app = lora.max_app_payload_bytes(header_len=3)
 
+    # Force smaller "app payload" budget to reduce fragmentation risk.
+    # (Does NOT change any addresses; only changes how big each TM fragment can be.)
+    TARGET_MAX_APP = 64
+    max_app = min(max_app, TARGET_MAX_APP)
+
     max_chunk = max_app - _TM_HDR_LEN
+
+    
     if max_chunk <= 0:
         return {
             "enabled": True,
@@ -496,33 +502,57 @@ def init_i2c_bus() -> busio.I2C:
 
 
 def init_sensors(i2c: busio.I2C) -> Dict[str, Any]:
+    """Initialize all I2C sensors.
+
+    Notes
+    -----
+    - We *always* record init failures into sensors["_init_errors"] so downstream telemetry
+      can surface the real reason fields show up as null.
+    - BME280 address is commonly 0x76 or 0x77. We try 0x76 first (matches your bus scan),
+      then fall back to 0x77.
+    """
     sensors: Dict[str, Any] = {
         "bme280_sensor": None,
         "ltr390_sensor": None,
         "tsl2591_sensor": None,
         "imu_sensor": None,
+        "_init_errors": {},  # type: ignore[dict-item]
     }
 
-    try:
-        sensors["bme280_sensor"] = adafruit_bme280.Adafruit_BME280_I2C(i2c)
-    except Exception:
-        sensors["bme280_sensor"] = None
+    init_errors: Dict[str, str] = {}
 
+    # --- BME280 (Temp/Pressure/Humidity) ---
+    try:
+        sensors["bme280_sensor"] = adafruit_bme280.Adafruit_BME280_I2C(i2c, address=0x76)
+    except Exception as e76:
+        try:
+            sensors["bme280_sensor"] = adafruit_bme280.Adafruit_BME280_I2C(i2c, address=0x77)
+        except Exception as e77:
+            sensors["bme280_sensor"] = None
+            init_errors["bme280_init"] = f"0x76 failed: {type(e76).__name__}: {e76}; 0x77 failed: {type(e77).__name__}: {e77}"
+
+    # --- LTR390 (UV/ALS) ---
     try:
         sensors["ltr390_sensor"] = adafruit_ltr390.LTR390(i2c)
-    except Exception:
+    except Exception as e:
         sensors["ltr390_sensor"] = None
+        init_errors["ltr390_init"] = f"{type(e).__name__}: {e}"
 
+    # --- TSL2591 (High range lux) ---
     try:
         sensors["tsl2591_sensor"] = adafruit_tsl2591.TSL2591(i2c)
-    except Exception:
+    except Exception as e:
         sensors["tsl2591_sensor"] = None
+        init_errors["tsl2591_init"] = f"{type(e).__name__}: {e}"
 
+    # --- IMU (ICM20948) ---
     try:
-        sensors["imu_sensor"] = ICM20948(i2c)
-    except Exception:
+        sensors["imu_sensor"] = ICM20948(i2c, address=0x68)
+    except Exception as e:
         sensors["imu_sensor"] = None
+        init_errors["imu_init"] = f"{type(e).__name__}: {e}"
 
+    sensors["_init_errors"] = init_errors  # type: ignore[index]
     return sensors
 
 
@@ -620,6 +650,13 @@ def main() -> None:
                 "sequence_id": sequence_id,
             }
 
+            # Surface one-time sensor init failures in the telemetry stream.
+            init_errs = sensors.get("_init_errors") or {}
+            if init_errs:
+                record.setdefault("errors", {})
+                for k, v in init_errs.items():
+                    record["errors"][k] = v
+
             record["image"] = {
                 "captured": False,
                 "seq": None,
@@ -711,3 +748,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

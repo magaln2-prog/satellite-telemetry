@@ -4,7 +4,6 @@ import struct
 MAGIC = b"TM"
 VER = 1
 
-# Header:
 # MAGIC(2), VER(1), MSG_ID(u16), FRAG_IDX(u8), FRAG_TOT(u8), PAYLEN(u8), CRC16(u16)
 HDR_FMT = ">2sB H B B B H"
 HDR_LEN = struct.calcsize(HDR_FMT)
@@ -19,30 +18,35 @@ def crc16_ccitt(data: bytes, poly: int = 0x1021, init: int = 0xFFFF) -> int:
     return crc
 
 def build_frame(msg_id: int, frag_idx: int, frag_tot: int, payload: bytes) -> bytes:
-    if not (0 <= msg_id <= 0xFFFF):
-        raise ValueError("msg_id out of range")
-    if not (0 <= frag_idx <= 255 and 1 <= frag_tot <= 255 and frag_idx < frag_tot):
-        raise ValueError("bad fragment indexing")
+    """
+    Build a single TM frame:
+      [MAGIC 'TM'][VER][msg_id][frag_idx][frag_tot][paylen][crc16][payload]
+    """
+    if not (1 <= frag_tot <= 255):
+        raise ValueError("frag_tot out of range")
+    if not (0 <= frag_idx < frag_tot):
+        raise ValueError("frag_idx out of range")
     if len(payload) > 255:
-        raise ValueError("payload too long for 1-byte length")
-    # Compute CRC over (VER..PAYLOAD_LEN + payload), excluding MAGIC and CRC field itself
-    header_wo_crc = struct.pack(">B H B B B", VER, msg_id, frag_idx, frag_tot, len(payload))
+        raise ValueError("payload too long (max 255)")
+
+    header_wo_crc = struct.pack(">B H B B B", VER, msg_id & 0xFFFF, frag_idx, frag_tot, len(payload))
     crc = crc16_ccitt(header_wo_crc + payload)
-    return struct.pack(HDR_FMT, MAGIC, VER, msg_id, frag_idx, frag_tot, len(payload), crc) + payload
+    return struct.pack(HDR_FMT, MAGIC, VER, msg_id & 0xFFFF, frag_idx, frag_tot, len(payload), crc) + payload
 
 def try_parse_one(buf: bytes):
     """
-    Attempt to parse a single frame from the front of buf.
-    Returns (frame_dict, remaining_buf) or (None, buf) if incomplete/invalid.
-    This is a stream parser (works even if UART bursts glue packets together).
-    """
-    import struct
+    Stream parser:
+      - Finds MAGIC anywhere (resync)
+      - Parses one complete TM frame if available
+      - Verifies CRC16
+    Returns: (frame_dict, remaining_buf) or (None, buf) if incomplete/invalid.
 
-    # Need at least header
+    frame_dict: {"msg_id": int, "frag_idx": int, "frag_tot": int, "payload": bytes}
+    """
     if len(buf) < HDR_LEN:
         return None, buf
 
-    # Find MAGIC at/after start (resync)
+    # Resync to MAGIC
     i = buf.find(MAGIC)
     if i == -1:
         return None, b""
@@ -53,18 +57,18 @@ def try_parse_one(buf: bytes):
 
     magic, ver, msg_id, frag_idx, frag_tot, paylen, crc = struct.unpack(HDR_FMT, buf[:HDR_LEN])
     if magic != MAGIC or ver != VER:
-        return None, buf[2:]  # resync one byte forward-ish
+        return None, buf[1:]  # slide forward and keep searching
 
     need = HDR_LEN + paylen
     if len(buf) < need:
-        return None, buf  # incomplete
+        return None, buf  # incomplete frame
 
     payload = buf[HDR_LEN:need]
+
     header_wo_crc = struct.pack(">B H B B B", ver, msg_id, frag_idx, frag_tot, paylen)
     crc_calc = crc16_ccitt(header_wo_crc + payload)
     if crc_calc != crc:
-        # Bad frame; drop MAGIC and keep scanning
-        return None, buf[2:]
+        return None, buf[1:]  # CRC mismatch, slide forward
 
     frame = {
         "msg_id": msg_id,

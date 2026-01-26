@@ -1,5 +1,6 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -9,409 +10,515 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
   <style>
-    :root{
-      --bg:#050607;
-      --panel:#0b0d10;
-      --panel2:#0f1216;
-      --red:#ff2b2b;
-      --red2:#b80f0f;
-      --text:#e6e6e6;
-      --muted:#9aa4ad;
-      --good:#30d158;
-      --warn:#ffd60a;
-      --bad:#ff453a;
-      --line:rgba(255,43,43,0.22);
-      --shadow:0 0 0 1px rgba(255,43,43,0.18), 0 10px 30px rgba(0,0,0,0.55);
-      --radius:16px;
+    :root {
+      --bg: #050607;
+      --panel: #0b0d10;
+      --panel2: #0f1216;
+      --red: #ff2b2b;
+      --red2: #b80f0f;
+      --text: #e6e6e6;
+      --muted: #9aa4ad;
+      --good: #30d158;
+      --warn: #ffd60a;
+      --bad: #ff453a;
+      --line: rgba(255, 43, 43, 0.22);
+      --shadow: 0 0 0 1px rgba(255, 43, 43, 0.18), 0 10px 30px rgba(0, 0, 0, 0.55);
+      --radius: 16px;
     }
-    *{box-sizing:border-box}
-    body{
-      margin:0;
-      background: radial-gradient(1200px 800px at 10% 10%, rgba(255,43,43,0.08), transparent 55%),
-                  radial-gradient(1200px 800px at 90% 20%, rgba(255,43,43,0.06), transparent 60%),
-                  var(--bg);
-      color:var(--text);
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-      letter-spacing:0.2px;
-    }
-    header{
-      padding:22px 22px 10px 22px;
-      display:flex;
-      justify-content:space-between;
-      align-items:flex-end;
-      border-bottom:1px solid rgba(255,43,43,0.15);
-    }
-    .title{
-      font-weight:800;
-      font-size:20px;
-      letter-spacing:0.8px;
-      text-transform:uppercase;
-    }
-    .subtitle{
-      color:var(--muted);
-      margin-top:6px;
-      font-size:12px;
-    }
-    .statusbar{
-      text-align:right;
-      font-size:12px;
-      color:var(--muted);
-      line-height:1.5;
-    }
-    .badge{
-      display:inline-block;
-      padding:4px 10px;
-      border-radius:999px;
-      border:1px solid rgba(255,43,43,0.28);
-      background: rgba(255,43,43,0.08);
-      color:var(--text);
-      font-weight:600;
-      margin-left:8px;
-    }
-    .badge.good{border-color:rgba(48,209,88,0.35); background:rgba(48,209,88,0.12)}
-    .badge.warn{border-color:rgba(255,214,10,0.35); background:rgba(255,214,10,0.12)}
-    .badge.bad{border-color:rgba(255,69,58,0.35); background:rgba(255,69,58,0.12)}
 
-    .grid{
-      display:grid;
+    * {
+      box-sizing: border-box
+    }
+
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 800px at 10% 10%, rgba(255, 43, 43, 0.08), transparent 55%),
+        radial-gradient(1200px 800px at 90% 20%, rgba(255, 43, 43, 0.06), transparent 60%),
+        var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      letter-spacing: 0.2px;
+    }
+
+    header {
+      padding: 22px 22px 10px 22px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      border-bottom: 1px solid rgba(255, 43, 43, 0.15);
+    }
+
+    .title {
+      font-weight: 800;
+      font-size: 20px;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      margin-top: 6px;
+      font-size: 12px;
+    }
+
+    .statusbar {
+      text-align: right;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 43, 43, 0.28);
+      background: rgba(255, 43, 43, 0.08);
+      color: var(--text);
+      font-weight: 600;
+      margin-left: 8px;
+    }
+
+    .badge.good {
+      border-color: rgba(48, 209, 88, 0.35);
+      background: rgba(48, 209, 88, 0.12)
+    }
+
+    .badge.warn {
+      border-color: rgba(255, 214, 10, 0.35);
+      background: rgba(255, 214, 10, 0.12)
+    }
+
+    .badge.bad {
+      border-color: rgba(255, 69, 58, 0.35);
+      background: rgba(255, 69, 58, 0.12)
+    }
+
+    .grid {
+      display: grid;
       grid-template-columns: 1.15fr 0.85fr;
-      gap:16px;
-      padding:16px 16px 26px 16px;
+      gap: 16px;
+      padding: 16px 16px 26px 16px;
     }
-    .panel{
-      background:linear-gradient(180deg, rgba(255,43,43,0.06), transparent 30%), var(--panel);
-      border-radius:var(--radius);
-      box-shadow:var(--shadow);
-      padding:14px;
-      border:1px solid rgba(255,43,43,0.12);
+
+    .panel {
+      background: linear-gradient(180deg, rgba(255, 43, 43, 0.06), transparent 30%), var(--panel);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 14px;
+      border: 1px solid rgba(255, 43, 43, 0.12);
     }
-    .panel h2{
-      margin:0 0 10px 0;
-      font-size:13px;
-      color:var(--muted);
-      font-weight:700;
-      text-transform:uppercase;
-      letter-spacing:0.8px;
+
+    .panel h2 {
+      margin: 0 0 10px 0;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
     }
-    .kv{
-      display:grid;
+
+    .kv {
+      display: grid;
       grid-template-columns: 1fr 1fr;
-      gap:10px;
+      gap: 10px;
     }
-    .card{
-      background:var(--panel2);
-      border-radius:14px;
-      padding:12px;
-      border:1px solid rgba(255,43,43,0.10);
+
+    .card {
+      background: var(--panel2);
+      border-radius: 14px;
+      padding: 12px;
+      border: 1px solid rgba(255, 43, 43, 0.10);
     }
-    .label{
-      color:var(--muted);
-      font-size:11px;
-      text-transform:uppercase;
-      letter-spacing:0.7px;
+
+    .label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
     }
-    .value{
-      margin-top:6px;
-      font-size:20px;
-      font-weight:800;
-      color:var(--text);
+
+    .value {
+      margin-top: 6px;
+      font-size: 20px;
+      font-weight: 800;
+      color: var(--text);
     }
-    .value small{
-      font-size:12px;
-      color:var(--muted);
-      margin-left:6px;
-      font-weight:600;
+
+    .value small {
+      font-size: 12px;
+      color: var(--muted);
+      margin-left: 6px;
+      font-weight: 600;
     }
-    .alerts{
-      display:flex;
-      flex-wrap:wrap;
-      gap:8px;
+
+    .alerts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
     }
-    .alert{
-      padding:8px 10px;
-      border-radius:12px;
-      background:rgba(255,69,58,0.12);
-      border:1px solid rgba(255,69,58,0.25);
-      font-weight:700;
-      font-size:12px;
+
+    .alert {
+      padding: 8px 10px;
+      border-radius: 12px;
+      background: rgba(255, 69, 58, 0.12);
+      border: 1px solid rgba(255, 69, 58, 0.25);
+      font-weight: 700;
+      font-size: 12px;
     }
-    .ok{
-      padding:10px;
-      border-radius:12px;
-      border:1px solid rgba(48,209,88,0.25);
-      background:rgba(48,209,88,0.12);
-      color:var(--text);
-      font-weight:700;
-      font-size:12px;
+
+    .ok {
+      padding: 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(48, 209, 88, 0.25);
+      background: rgba(48, 209, 88, 0.12);
+      color: var(--text);
+      font-weight: 700;
+      font-size: 12px;
     }
-    .row2{
-      display:grid;
+
+    .row2 {
+      display: grid;
       grid-template-columns: 1fr 1fr;
-      gap:16px;
-      margin-top:16px;
+      gap: 16px;
+      margin-top: 16px;
     }
-    canvas{ width:100% !important; height:240px !important; }
-    .footer{
-      padding:0 16px 16px;
-      color:var(--muted);
-      font-size:12px;
+
+    canvas {
+      width: 100% !important;
+      height: 240px !important;
     }
-    a{ color:var(--red); text-decoration:none; }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+
+    .footer {
+      padding: 0 16px 16px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    a {
+      color: var(--red);
+      text-decoration: none;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
   </style>
 </head>
 
 <body>
-<header>
-  <div>
-    <div class="title">UNLV ATLAS-1 HAB Ground Station</div>
-    <div class="subtitle">Live telemetry • LoRa RX → latest.json • Web dashboard</div>
-  </div>
-  <div class="statusbar">
-    <div>Run: <span id="run_id" class="mono">—</span></div>
-    <div>Last packet: <span id="last_ts" class="mono">—</span> <span id="age_badge" class="badge">—</span></div>
-    <div>Server: <span id="server_time" class="mono">—</span></div>
-  </div>
-</header>
-
-<div class="grid">
-  <!-- Left: charts -->
-  <div class="panel">
-    <h2>Real-time Graphs</h2>
-    <div class="row2">
-      <div class="card">
-        <div class="label">Temperature (°C) / Humidity (%)</div>
-        <canvas id="chart_env"></canvas>
-      </div>
-      <div class="card">
-        <div class="label">Pressure (hPa) / Lux</div>
-        <canvas id="chart_press_lux"></canvas>
-      </div>
+  <header>
+    <div>
+      <div class="title">UNLV ATLAS-1 HAB Ground Station</div>
+      <div class="subtitle">Live telemetry • LoRa RX → latest.json • Web dashboard</div>
     </div>
-    <div class="row2">
-      <div class="card">
-        <div class="label">Battery Voltage (V) / Battery %</div>
-        <canvas id="chart_batt"></canvas>
-      </div>
-      <div class="card">
-        <div class="label">IMU Magnitudes (Accel / Mag)</div>
-        <canvas id="chart_imu"></canvas>
-      </div>
+    <div class="statusbar">
+      <div>Run: <span id="run_id" class="mono">—</span></div>
+      <div>Last packet: <span id="last_ts" class="mono">—</span> <span id="age_badge" class="badge">—</span></div>
+      <div>Server: <span id="server_time" class="mono">—</span></div>
     </div>
-  </div>
+  </header>
 
-  <!-- Right: structured values -->
-  <div>
+  <div class="grid">
+    <!-- Left: charts -->
     <div class="panel">
-      <h2>Sensors</h2>
-      <div class="kv">
-        <div class="card"><div class="label">Temp</div><div class="value" id="t_c">— <small>°C</small></div></div>
-        <div class="card"><div class="label">Humidity</div><div class="value" id="rh">— <small>%</small></div></div>
-        <div class="card"><div class="label">Pressure</div><div class="value" id="p_hpa">— <small>hPa</small></div></div>
-        <div class="card"><div class="label">Lux</div><div class="value" id="lux">— <small>lx</small></div></div>
-        <div class="card"><div class="label">UVI</div><div class="value" id="uvi">—</div></div>
-        <div class="card"><div class="label">CPU Temp</div><div class="value" id="cpu_c">— <small>°C</small></div></div>
+      <h2>Real-time Graphs</h2>
+      <div class="row2">
+        <div class="card">
+          <div class="label">Temperature (°C) / Humidity (%)</div>
+          <canvas id="chart_env"></canvas>
+        </div>
+        <div class="card">
+          <div class="label">Pressure (hPa) / Lux</div>
+          <canvas id="chart_press_lux"></canvas>
+        </div>
+      </div>
+      <div class="row2">
+        <div class="card">
+          <div class="label">Battery Voltage (V) / Battery %</div>
+          <canvas id="chart_batt"></canvas>
+        </div>
+        <div class="card">
+          <div class="label">IMU Magnitudes (Accel / Mag)</div>
+          <canvas id="chart_imu"></canvas>
+        </div>
       </div>
     </div>
 
-    <div class="panel" style="margin-top:16px;">
-      <h2>Battery Health</h2>
-      <div class="kv">
-        <div class="card"><div class="label">Battery Voltage</div><div class="value" id="bv">— <small>V</small></div></div>
-        <div class="card"><div class="label">Battery %</div><div class="value" id="bp">— <small>%</small></div></div>
-        <div class="card"><div class="label">Battery Current</div><div class="value" id="ba">— <small>A</small></div></div>
-        <div class="card"><div class="label">Power Flags</div><div class="value" id="pwr_flags" style="font-size:14px; font-weight:700;">—</div></div>
+    <!-- Right: structured values -->
+    <div>
+      <div class="panel">
+        <h2>Sensors</h2>
+        <div class="kv">
+          <div class="card">
+            <div class="label">Temp</div>
+            <div class="value" id="t_c">— <small>°C</small></div>
+          </div>
+          <div class="card">
+            <div class="label">Humidity</div>
+            <div class="value" id="rh">— <small>%</small></div>
+          </div>
+          <div class="card">
+            <div class="label">Pressure</div>
+            <div class="value" id="p_hpa">— <small>hPa</small></div>
+          </div>
+          <div class="card">
+            <div class="label">Lux</div>
+            <div class="value" id="lux">— <small>lx</small></div>
+          </div>
+          <div class="card">
+            <div class="label">UVI</div>
+            <div class="value" id="uvi">—</div>
+          </div>
+          <div class="card">
+            <div class="label">CPU Temp</div>
+            <div class="value" id="cpu_c">— <small>°C</small></div>
+          </div>
+        </div>
       </div>
-    </div>
 
-    <div class="panel" style="margin-top:16px;">
-      <h2>Alerts</h2>
-      <div id="alerts_box" class="ok">No alerts.</div>
-    </div>
+      <div class="panel" style="margin-top:16px;">
+        <h2>Battery Health</h2>
+        <div class="kv">
+          <div class="card">
+            <div class="label">Battery Voltage</div>
+            <div class="value" id="bv">— <small>V</small></div>
+          </div>
+          <div class="card">
+            <div class="label">Battery %</div>
+            <div class="value" id="bp">— <small>%</small></div>
+          </div>
+          <div class="card">
+            <div class="label">Battery Current</div>
+            <div class="value" id="ba">— <small>A</small></div>
+          </div>
+          <div class="card">
+            <div class="label">Power Flags</div>
+            <div class="value" id="pwr_flags" style="font-size:14px; font-weight:700;">—</div>
+          </div>
+        </div>
+      </div>
 
-    <div class="panel" style="margin-top:16px;">
-      <h2>Images</h2>
-      <div class="card">
-        <div class="label">Flight image indicator</div>
-        <div class="value" id="img_status" style="font-size:14px; font-weight:700;">—</div>
-        <div class="subtitle" style="margin-top:8px;">
-          Current radio format sends <b>img: 0/1</b> (flag only). If you later add image downlink, we’ll show thumbnails here.
+      <div class="panel" style="margin-top:16px;">
+        <h2>Alerts</h2>
+        <div id="alerts_box" class="ok">No alerts.</div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <h2>Images</h2>
+        <div class="card">
+          <div class="label">Flight image indicator</div>
+          <div class="value" id="img_status" style="font-size:14px; font-weight:700;">—</div>
+          <div class="subtitle" style="margin-top:8px;">
+            Current radio format sends <b>img: 0/1</b> (flag only). If you later add image downlink, we’ll show
+            thumbnails here.
+          </div>
         </div>
       </div>
     </div>
   </div>
-</div>
 
-<div class="footer">
-  Tips: keep this tab open; it updates automatically. If you change the dashboard port, use <span class="mono">:PORT</span> in your browser URL.
-</div>
+  <div class="footer">
+    Tips: keep this tab open; it updates automatically. If you change the dashboard port, use <span
+      class="mono">:PORT</span> in your browser URL.
+  </div>
 
-<script>
-  const $ = (id) => document.getElementById(id);
+  <script>
+    const $ = (id) => document.getElementById(id);
 
-  function toEpochSeconds(iso) {
-    try { return Date.parse(iso) / 1000; } catch(e) { return null; }
-  }
-
-  function fmt(n, digits=2) {
-    if (n === null || n === undefined || Number.isNaN(n)) return "—";
-    return Number(n).toFixed(digits);
-  }
-
-  // Pick the best timestamp field for display.
-  // rx_to_latest.py can add _rx_utc (preferred); older scripts used _rx_ts.
-  function pickTs(obj) {
-    if (!obj) return "";
-    return obj._rx_utc || obj._rx_ts || obj.ts || obj.timestamp_utc || "";
-  }
-
-  function mag3(a) {
-    if (!Array.isArray(a) || a.length < 3) return null;
-    const x=Number(a[0]), y=Number(a[1]), z=Number(a[2]);
-    if ([x,y,z].some(v => Number.isNaN(v))) return null;
-    return Math.sqrt(x*x+y*y+z*z);
-  }
-
-  // Charts
-  const envChart = new Chart($("chart_env"), {
-    type: "line",
-    data: { labels: [], datasets: [
-      { label: "Temp (°C)", data: [], borderColor: "#ff2b2b", tension: 0.2 },
-      { label: "RH (%)", data: [], borderColor: "#ff8c8c", tension: 0.2 },
-    ]},
-    options: { responsive: true, animation: false, scales: { x: { ticks: { color: "#9aa4ad"}}, y: { ticks: { color: "#9aa4ad"}}}, plugins: { legend: { labels: { color:"#e6e6e6" }}}}
-  });
-
-  const pressLuxChart = new Chart($("chart_press_lux"), {
-    type: "line",
-    data: { labels: [], datasets: [
-      { label: "Pressure (hPa)", data: [], borderColor: "#ff2b2b", tension: 0.2 },
-      { label: "Lux", data: [], borderColor: "#ff8c8c", tension: 0.2 },
-    ]},
-    options: { responsive: true, animation: false, scales: { x: { ticks: { color: "#9aa4ad"}}, y: { ticks: { color: "#9aa4ad"}}}, plugins: { legend: { labels: { color:"#e6e6e6" }}}}
-  });
-
-  const battChart = new Chart($("chart_batt"), {
-    type: "line",
-    data: { labels: [], datasets: [
-      { label: "Batt V", data: [], borderColor: "#ff2b2b", tension: 0.2 },
-      { label: "Batt %", data: [], borderColor: "#ff8c8c", tension: 0.2 },
-    ]},
-    options: { responsive: true, animation: false, scales: { x: { ticks: { color: "#9aa4ad"}}, y: { ticks: { color: "#9aa4ad"}}}, plugins: { legend: { labels: { color:"#e6e6e6" }}}}
-  });
-
-  const imuChart = new Chart($("chart_imu"), {
-    type: "line",
-    data: { labels: [], datasets: [
-      { label: "Accel |a|", data: [], borderColor: "#ff2b2b", tension: 0.2 },
-      { label: "Mag |m|", data: [], borderColor: "#ff8c8c", tension: 0.2 },
-    ]},
-    options: { responsive: true, animation: false, scales: { x: { ticks: { color: "#9aa4ad"}}, y: { ticks: { color: "#9aa4ad"}}}, plugins: { legend: { labels: { color:"#e6e6e6" }}}}
-  });
-
-  function setAgeBadge(ageSec) {
-    const b = $("age_badge");
-    if (ageSec === null) { b.textContent="—"; b.className="badge"; return; }
-    b.textContent = `${ageSec.toFixed(1)}s`;
-    b.className = "badge " + (ageSec < 3 ? "good" : (ageSec < 10 ? "warn" : "bad"));
-  }
-
-  function updateUI(latest) {
-    if (!latest) return;
-
-    $("run_id").textContent = latest.run_id || (latest.seq ?? latest.sequence_id ?? "—");
-    $("last_ts").textContent = pickTs(latest) || "—";
-
-    // Sensor fields (your compact packet keys)
-    $("t_c").innerHTML = `${fmt(latest.t_c,2)} <small>°C</small>`;
-    $("rh").innerHTML  = `${fmt(latest.rh,1)} <small>%</small>`;
-    $("p_hpa").innerHTML = `${fmt(latest.p_hpa,2)} <small>hPa</small>`;
-    $("lux").innerHTML = `${fmt(latest.lux,2)} <small>lx</small>`;
-    $("uvi").textContent = (latest.uvi === undefined ? "—" : fmt(latest.uvi,2));
-    $("cpu_c").innerHTML = `${fmt(latest.cpu_c,1)} <small>°C</small>`;
-
-    $("bv").innerHTML = `${fmt(latest.bv,2)} <small>V</small>`;
-    $("bp").innerHTML = `${latest.bp ?? "—"} <small>%</small>`;
-    $("ba").innerHTML = `${fmt(latest.ba,2)} <small>A</small>`;
-
-    // Power/throttle flags are only available if rx_to_latest adds them or if you transmit them.
-    // If your receiver stores radio metadata, show RSSI as a quick sanity check.
-    const rssi = latest?._radio?.packet_rssi_dbm;
-    $("pwr_flags").textContent = (rssi !== undefined && rssi !== null) ? (`RSSI ${rssi} dBm`) : "OK";
-
-    // Alerts
-    const alerts = Array.isArray(latest.alerts) ? latest.alerts : [];
-    if (alerts.length === 0) {
-      $("alerts_box").className = "ok";
-      $("alerts_box").textContent = "No alerts.";
-    } else {
-      $("alerts_box").className = "alerts";
-      $("alerts_box").innerHTML = alerts.map(a => `<div class="alert">${a}</div>`).join("");
+    function fmt(n, digits = 2) {
+      if (n === null || n === undefined || Number.isNaN(n)) return "—";
+      return Number(n).toFixed(digits);
     }
 
-    // Images flag
-    $("img_status").textContent = (latest.img === 1) ? "Flight reports image capture: YES (flag=1)" : "No image event (flag=0)";
-  }
-
-  function pushSeries(chart, labels, seriesArrays, maxPoints=300) {
-    chart.data.labels = labels.slice(-maxPoints);
-    for (let i=0; i<chart.data.datasets.length; i++) {
-      chart.data.datasets[i].data = (seriesArrays[i] || []).slice(-maxPoints);
+    function pickTs(obj) {
+      if (!obj) return "";
+      return obj._rx_utc || obj._rx_ts || obj.ts || obj.timestamp_utc || "";
     }
-    chart.update();
-  }
 
-  async function refresh() {
-    try {
-      const health = await fetch("/api/health").then(r=>r.json());
-      $("server_time").textContent = health.server_time || "—";
-      // Use backend-computed age (seconds since last packet) to show NO CONTACT reliably.
-      setAgeBadge((health.latest_age_s === undefined) ? null : health.latest_age_s);
+    function mag3(a) {
+      if (!Array.isArray(a) || a.length < 3) return null;
+      const x = Number(a[0]), y = Number(a[1]), z = Number(a[2]);
+      if ([x, y, z].some(v => Number.isNaN(v))) return null;
+      return Math.sqrt(x * x + y * y + z * z);
+    }
 
-      const latestRes = await fetch("/api/latest").then(r=>r.json());
-      if (latestRes && latestRes.ok && latestRes.latest) {
-        updateUI(latestRes.latest);
+    // --- Option B: latch last valid telemetry so UI never blanks ---
+    let lastGood = null;
+
+    function looksLikeTelemetry(L) {
+      if (!L || typeof L !== "object") return false;
+      return (
+        L.seq !== undefined ||
+        L.t_c !== undefined ||
+        L.p_hpa !== undefined ||
+        L.rh !== undefined ||
+        L.lux !== undefined ||
+        L.cpu_c !== undefined ||
+        L.bv !== undefined ||
+        L.bp !== undefined
+      );
+    }
+
+    // Charts
+    const envChart = new Chart($("chart_env"), {
+      type: "line",
+      data: {
+        labels: [], datasets: [
+          { label: "Temp (°C)", data: [], borderColor: "#ff2b2b", tension: 0.2 },
+          { label: "RH (%)", data: [], borderColor: "#ff8c8c", tension: 0.2 },
+        ]
+      },
+      options: { responsive: true, animation: false, scales: { x: { ticks: { color: "#9aa4ad" } }, y: { ticks: { color: "#9aa4ad" } } }, plugins: { legend: { labels: { color: "#e6e6e6" } } } }
+    });
+
+    const pressLuxChart = new Chart($("chart_press_lux"), {
+      type: "line",
+      data: {
+        labels: [], datasets: [
+          { label: "Pressure (hPa)", data: [], borderColor: "#ff2b2b", tension: 0.2 },
+          { label: "Lux", data: [], borderColor: "#ff8c8c", tension: 0.2 },
+        ]
+      },
+      options: { responsive: true, animation: false, scales: { x: { ticks: { color: "#9aa4ad" } }, y: { ticks: { color: "#9aa4ad" } } }, plugins: { legend: { labels: { color: "#e6e6e6" } } } }
+    });
+
+    const battChart = new Chart($("chart_batt"), {
+      type: "line",
+      data: {
+        labels: [], datasets: [
+          { label: "Batt V", data: [], borderColor: "#ff2b2b", tension: 0.2 },
+          { label: "Batt %", data: [], borderColor: "#ff8c8c", tension: 0.2 },
+        ]
+      },
+      options: { responsive: true, animation: false, scales: { x: { ticks: { color: "#9aa4ad" } }, y: { ticks: { color: "#9aa4ad" } } }, plugins: { legend: { labels: { color: "#e6e6e6" } } } }
+    });
+
+    const imuChart = new Chart($("chart_imu"), {
+      type: "line",
+      data: {
+        labels: [], datasets: [
+          { label: "Accel |a|", data: [], borderColor: "#ff2b2b", tension: 0.2 },
+          { label: "Mag |m|", data: [], borderColor: "#ff8c8c", tension: 0.2 },
+        ]
+      },
+      options: { responsive: true, animation: false, scales: { x: { ticks: { color: "#9aa4ad" } }, y: { ticks: { color: "#9aa4ad" } } }, plugins: { legend: { labels: { color: "#e6e6e6" } } } }
+    });
+
+    function setAgeBadge(ageSec) {
+      const b = $("age_badge");
+      if (ageSec === null) { b.textContent = "—"; b.className = "badge"; return; }
+      b.textContent = `${ageSec.toFixed(1)}s`;
+      b.className = "badge " + (ageSec < 3 ? "good" : (ageSec < 10 ? "warn" : "bad"));
+    }
+
+    function updateUI(latest) {
+      if (!latest) return;
+
+      $("run_id").textContent = latest.run_id || (latest.seq ?? latest.sequence_id ?? "—");
+      $("last_ts").textContent = pickTs(latest) || "—";
+
+      $("t_c").innerHTML = `${fmt(latest.t_c, 2)} <small>°C</small>`;
+      $("rh").innerHTML = `${fmt(latest.rh, 1)} <small>%</small>`;
+      $("p_hpa").innerHTML = `${fmt(latest.p_hpa, 2)} <small>hPa</small>`;
+      $("lux").innerHTML = `${fmt(latest.lux, 2)} <small>lx</small>`;
+      $("uvi").textContent = (latest.uvi === undefined ? "—" : fmt(latest.uvi, 2));
+      $("cpu_c").innerHTML = `${fmt(latest.cpu_c, 1)} <small>°C</small>`;
+
+      $("bv").innerHTML = `${fmt(latest.bv, 2)} <small>V</small>`;
+      $("bp").innerHTML = `${latest.bp ?? "—"} <small>%</small>`;
+      $("ba").innerHTML = `${fmt(latest.ba, 2)} <small>A</small>`;
+
+      const rssi = latest?._radio?.packet_rssi_dbm;
+      $("pwr_flags").textContent = (rssi !== undefined && rssi !== null) ? (`RSSI ${rssi} dBm`) : "OK";
+
+      const alerts = Array.isArray(latest.alerts) ? latest.alerts : [];
+      if (alerts.length === 0) {
+        $("alerts_box").className = "ok";
+        $("alerts_box").textContent = "No alerts.";
+      } else {
+        $("alerts_box").className = "alerts";
+        $("alerts_box").innerHTML = alerts.map(a => `<div class="alert">${a}</div>`).join("");
       }
 
-      // Pull history if available
-      const histRes = await fetch("/api/history").then(r=>r.json());
-      const recs = histRes.records || [];
-
-      if (recs.length > 1) {
-        const labels = recs.map(r => (pickTs(r) || "").slice(11,19)); // HH:MM:SS
-
-        pushSeries(envChart, labels, [
-          recs.map(r => r.t_c ?? null),
-          recs.map(r => r.rh ?? null),
-        ]);
-
-        pushSeries(pressLuxChart, labels, [
-          recs.map(r => r.p_hpa ?? null),
-          recs.map(r => r.lux ?? null),
-        ]);
-
-        pushSeries(battChart, labels, [
-          recs.map(r => r.bv ?? null),
-          recs.map(r => r.bp ?? null),
-        ]);
-
-        // If you ever start sending accel/mag arrays, we can plot true magnitudes.
-        // For now we plot placeholders (null) unless your packet includes them.
-        pushSeries(imuChart, labels, [
-          recs.map(r => r.acc_mag ?? null),
-          recs.map(r => r.mag_mag ?? null),
-        ]);
+      // Don't force "No image" if field isn't present.
+      if (latest.img === 1) {
+        $("img_status").textContent = "Flight reports image capture: YES (flag=1)";
+      } else if (latest.img === 0) {
+        $("img_status").textContent = "No image event (flag=0)";
+      } else {
+        $("img_status").textContent = "—";
       }
-    } catch (e) {
-      // If RX temporarily stops, page still stays up.
-      console.log("refresh error:", e);
     }
-  }
 
-  refresh();
-  setInterval(refresh, 1000);
+    function pushSeries(chart, labels, seriesArrays, maxPoints = 300) {
+      chart.data.labels = labels.slice(-maxPoints);
+      for (let i = 0; i < chart.data.datasets.length; i++) {
+        chart.data.datasets[i].data = (seriesArrays[i] || []).slice(-maxPoints);
+      }
+      chart.update();
+    }
 
-</script>
+    async function refresh() {
+      try {
+        const health = await fetch("/api/health").then(r => r.json());
+        $("server_time").textContent = health.server_time || "—";
+        setAgeBadge((health.latest_age_s === undefined) ? null : health.latest_age_s);
+
+        const latestRes = await fetch("/api/latest").then(r => r.json());
+        if (latestRes && latestRes.ok && latestRes.latest) {
+          const L = latestRes.latest;
+
+          // Latch only real telemetry to prevent flicker/blanking.
+          if (looksLikeTelemetry(L)) {
+            lastGood = L;
+            updateUI(L);
+          } else if (lastGood) {
+            // Status-only payload: keep last good values on screen.
+            updateUI(lastGood);
+          }
+        } else if (lastGood) {
+          // API not OK: keep last good values on screen.
+          updateUI(lastGood);
+        }
+
+        const histRes = await fetch("/api/history").then(r => r.json());
+        const recs = histRes.records || [];
+
+        if (recs.length > 1) {
+          const labels = recs.map(r => (pickTs(r) || "").slice(11, 19)); // HH:MM:SS
+
+          pushSeries(envChart, labels, [
+            recs.map(r => r.t_c ?? null),
+            recs.map(r => r.rh ?? null),
+          ]);
+
+          pushSeries(pressLuxChart, labels, [
+            recs.map(r => r.p_hpa ?? null),
+            recs.map(r => r.lux ?? null),
+          ]);
+
+          pushSeries(battChart, labels, [
+            recs.map(r => r.bv ?? null),
+            recs.map(r => r.bp ?? null),
+          ]);
+
+          pushSeries(imuChart, labels, [
+            recs.map(r => r.acc_mag ?? null),
+            recs.map(r => r.mag_mag ?? null),
+          ]);
+        }
+      } catch (e) {
+        console.log("refresh error:", e);
+        // Keep showing last known good telemetry even if a fetch hiccups.
+        if (lastGood) updateUI(lastGood);
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 1000);
+  </script>
 
 </body>
+
 </html>
