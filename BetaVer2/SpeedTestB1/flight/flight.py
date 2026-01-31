@@ -446,6 +446,16 @@ def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, An
     chunks = [blob[i:i + max_chunk] for i in range(0, len(blob), max_chunk)]
     frag_tot = len(chunks)
 
+    if frag_tot > 255:
+        return {
+            "enabled": True,
+            "tx_success": False,
+            "tx_error": "too_many_fragments",
+            "frags_total": frag_tot,
+            "payload_bytes": blob_len,
+        }
+
+
     # IMPORTANT: msg_id must be the SAME for all fragments of this message
     msg_id = int(packet.get("seq") or 0) & 0xFFFF
 
@@ -503,6 +513,7 @@ def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, An
         "msg_id": msg_id,
         "frags_total": frag_tot,
         "frags_sent": sent,
+        "payload_bytes": blob_len,   # NEW
     }
 
 
