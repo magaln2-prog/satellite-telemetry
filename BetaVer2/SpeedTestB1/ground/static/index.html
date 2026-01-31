@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>UNLV ATLAS-1 HAB Ground Station (v5)</title>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #050607;
+      --panel: #0b0d10;
+      --panel2: #0f1216;
+      --red: #ff2b2b;
+      --peach: #ffb78c;
+      --text: #e6e6e6;
+      --muted: #9aa4ad;
+      --good: #30d158;
+      --warn: #ffd60a;
+      --bad: #ff453a;
+      --shadow: 0 0 0 1px rgba(255, 43, 43, 0.18), 0 10px 30px rgba(0, 0, 0, 0.55);
+      --radius: 16px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+    }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      /* IMPORTANT: no page scroll (only table scrolls) */
+      background:
+        radial-gradient(1200px 800px at 10% 10%, rgba(255, 43, 43, 0.08), transparent 55%),
+        radial-gradient(1200px 800px at 90% 20%, rgba(255, 43, 43, 0.06), transparent 60%),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      letter-spacing: 0.2px;
+    }
+
+    header {
+      padding: 18px 18px 10px 18px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      border-bottom: 1px solid rgba(255, 43, 43, 0.15);
+    }
+
+    .title {
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      margin-top: 6px;
+      font-size: 12px;
+    }
+
+    .statusbar {
+      text-align: right;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 43, 43, 0.28);
+      background: rgba(255, 43, 43, 0.08);
+      color: var(--text);
+      font-weight: 600;
+      margin-left: 8px;
+      font-family: var(--mono);
+    }
+
+    .badge.good {
+      border-color: rgba(48, 209, 88, 0.35);
+      background: rgba(48, 209, 88, 0.12)
+    }
+
+    .badge.warn {
+      border-color: rgba(255, 214, 10, 0.35);
+      background: rgba(255, 214, 10, 0.12)
+    }
+
+    .badge.bad {
+      border-color: rgba(255, 69, 58, 0.35);
+      background: rgba(255, 69, 58, 0.12)
+    }
+
+    /* Main layout fits within viewport */
+    .wrap {
+      height: calc(100vh - 64px);
+      /* header height-ish */
+      padding: 14px;
+    }
+
+    .grid {
+      height: 100%;
+      display: grid;
+      grid-template-columns: 1.25fr 0.75fr;
+      /* charts left, panels+table right */
+      gap: 14px;
+      min-height: 0;
+      /* allows inner scroll areas */
+    }
+
+    .panel {
+      background: linear-gradient(180deg, rgba(255, 43, 43, 0.06), transparent 30%), var(--panel);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 12px;
+      border: 1px solid rgba(255, 43, 43, 0.12);
+      min-height: 0;
+    }
+
+    .panel h2 {
+      margin: 0 0 10px 0;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+
+    .card {
+      background: var(--panel2);
+      border-radius: 14px;
+      padding: 10px;
+      border: 1px solid rgba(255, 43, 43, 0.10);
+      min-height: 0;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      margin-bottom: 6px;
+    }
+
+    /* --- Charts: SMALL and all visible --- */
+    .chartsGrid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .chart-container {
+      position: relative;
+      width: 100%;
+      padding-top: 40%;
+      /* ↓ smaller graphs (try 22% if you want even smaller) */
+    }
+
+    .chart-container canvas {
+      position: absolute;
+      inset: 0;
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    /* Right column */
+    .rightCol {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto auto auto 1fr;
+      /* sensors, battery, alerts, table */
+      gap: 10px;
+      min-height: 0;
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .value {
+      margin-top: 2px;
+      font-size: 18px;
+      font-weight: 900;
+      color: var(--text);
+      font-family: var(--mono);
+    }
+
+    .value small {
+      font-size: 11px;
+      color: var(--muted);
+      margin-left: 6px;
+      font-weight: 700;
+      font-family: var(--sans);
+    }
+
+    .ok {
+      padding: 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(48, 209, 88, 0.25);
+      background: rgba(48, 209, 88, 0.12);
+      color: var(--text);
+      font-weight: 800;
+      font-size: 12px;
+    }
+
+    /* Table: ONLY this scrolls */
+    .tableWrap {
+      min-height: 0;
+      overflow: auto;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 43, 43, 0.12);
+      background: rgba(0, 0, 0, 0.15);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    th,
+    td {
+      border: 1px solid rgba(255, 43, 43, 0.12);
+      padding: 4px 6px;
+      text-align: center;
+      color: var(--text);
+      white-space: nowrap;
+      font-family: var(--mono);
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      background: #ff2b2b;
+      color: #fff;
+      font-weight: 900;
+      z-index: 2;
+      font-family: var(--sans);
+      letter-spacing: 0.3px;
+    }
+
+    tbody tr.odd {
+      background: var(--panel2);
+    }
+
+    tbody tr.even {
+      background: rgba(255, 43, 43, 0.10);
+    }
+
+    @media (max-width: 980px) {
+      body {
+        overflow: auto;
+      }
+
+      /* on small screens allow scroll */
+      .wrap {
+        height: auto;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+
+      .rightCol {
+        grid-template-rows: auto auto auto auto;
+      }
+
+      .chart-container {
+        padding-top: 34%;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div>
+      <div class="title">UNLV ATLAS-1 HAB Ground Station</div>
+      <div class="subtitle">Live updates</div>
+    </div>
+    <div class="statusbar">
+      <div>Run: <span id="run_id" class="badge">—</span></div>
+      <div>Last packet: <span id="last_ts" style="font-family:var(--mono); color:var(--text)">—</span>
+        <span id="age_badge" class="badge">—</span>
+      </div>
+      <div>Server: <span id="server_time" style="font-family:var(--mono); color:var(--text)">—</span></div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="grid">
+      <!-- LEFT: Charts (smaller, all visible) -->
+      <div class="panel">
+        <h2>Real-time Graphs</h2>
+
+        <div class="chartsGrid">
+          <div class="card">
+            <div class="label">Temperature (°C)</div>
+            <div class="chart-container"><canvas id="chart_temp"></canvas></div>
+          </div>
+
+          <div class="card">
+            <div class="label">Relative Humidity (%)</div>
+            <div class="chart-container"><canvas id="chart_rh"></canvas></div>
+          </div>
+
+          <div class="card">
+            <div class="label">Pressure (hPa)</div>
+            <div class="chart-container"><canvas id="chart_pressure"></canvas></div>
+          </div>
+
+          <div class="card">
+            <div class="label">Lux</div>
+            <div class="chart-container"><canvas id="chart_lux"></canvas></div>
+          </div>
+
+          <div class="card">
+            <div class="label">Battery Voltage (V)</div>
+            <div class="chart-container"><canvas id="chart_bv"></canvas></div>
+          </div>
+
+          <div class="card">
+            <div class="label">Battery %</div>
+            <div class="chart-container"><canvas id="chart_bp"></canvas></div>
+          </div>
+
+          <!-- Optional 7th chart (uncomment if you have ba in latest):
+        <div class="card" style="grid-column:1 / span 2;">
+          <div class="label">Battery Current (A)</div>
+          <div class="chart-container" style="padding-top:18%;"><canvas id="chart_ba"></canvas></div>
+        </div>
+        -->
+        </div>
+      </div>
+
+      <!-- RIGHT: Sensors + Battery + Alerts + Table (table bottom-right) -->
+      <div class="rightCol">
+        <div class="panel">
+          <h2>Sensors</h2>
+          <div class="kv">
+            <div class="card">
+              <div class="label">Temp</div>
+              <div class="value" id="t_c">— <small>°C</small></div>
+            </div>
+            <div class="card">
+              <div class="label">Humidity</div>
+              <div class="value" id="rh">— <small>%</small></div>
+            </div>
+            <div class="card">
+              <div class="label">Pressure</div>
+              <div class="value" id="p_hpa">— <small>hPa</small></div>
+            </div>
+            <div class="card">
+              <div class="label">Lux</div>
+              <div class="value" id="lux">— <small>lx</small></div>
+            </div>
+            <div class="card">
+              <div class="label">UVI</div>
+              <div class="value" id="uvi">—</div>
+            </div>
+            <div class="card">
+              <div class="label">CPU Temp</div>
+              <div class="value" id="cpu_c">— <small>°C</small></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Battery Health</h2>
+          <div class="kv">
+            <div class="card">
+              <div class="label">Battery Voltage</div>
+              <div class="value" id="bv">— <small>V</small></div>
+            </div>
+            <div class="card">
+              <div class="label">Battery %</div>
+              <div class="value" id="bp">— <small>%</small></div>
+            </div>
+            <div class="card">
+              <div class="label">Power Flags</div>
+              <div class="value" id="pwr_flags" style="font-size:14px; font-weight:900;">—</div>
+            </div>
+            <div class="card">
+              <div class="label">Sequence</div>
+              <div class="value" id="seq">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Contact</h2>
+          <div id="alerts_box" class="ok">No alerts.</div>
+        </div>
+
+        <div class="panel" style="min-height:0;">
+          <h2>Sensor Log</h2>
+          <div class="tableWrap">
+            <table id="sensor_table">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>Temp</th>
+                  <th>RH</th>
+                  <th>Press</th>
+                  <th>Lux</th>
+                  <th>UVI</th>
+                  <th>CPU</th>
+                  <th>BV</th>
+                  <th>BP</th>
+                  <th>Flags</th>
+                </tr>
+              </thead>
+              <tbody id="sensor_table_body">
+                <tr>
+                  <td colspan="10" style="text-align:center; font-family:var(--sans); color:var(--muted);">Loading…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function fmt(n, d = 2) {
+      return (n === null || n === undefined || Number.isNaN(n)) ? "—" : Number(n).toFixed(d);
+    }
+    function isNum(x) { return typeof x === "number" && Number.isFinite(x); }
+
+    function fmtTimeLabel(iso) {
+      if (!iso || typeof iso !== "string") return "—";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return iso.slice(11, 19);
+      return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+    }
+
+    // Chart background plugin (subtle red tint like your V4)
+    const chartBgPlugin = {
+      id: "chartBg",
+      beforeDraw(chart) {
+        const { ctx, chartArea } = chart;
+        if (!chartArea) return;
+        ctx.save();
+        ctx.fillStyle = "rgba(255,43,43,0.10)";
+        ctx.fillRect(chartArea.left, chartArea.top, chartArea.right - chartArea.left, chartArea.bottom - chartArea.top);
+        ctx.restore();
+      }
+    };
+    Chart.register(chartBgPlugin);
+
+    function createChart(canvasId, label, color, fixedScale = null) {
+      return new Chart($(canvasId), {
+        type: "line",
+        data: {
+          labels: [],
+          datasets: [{
+            label,
+            data: [],
+            borderColor: color,
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.25
+          }]
+        },
+        options: {
+          responsive: true,
+          animation: false,
+          maintainAspectRatio: false,
+          scales: {
+            x: {
+              ticks: { color: "#9aa4ad", maxRotation: 0, autoSkip: true, maxTicksLimit: 6 },
+              grid: { color: "rgba(255,255,255,0.04)" }
+            },
+            y: {
+              min: fixedScale?.min,
+              max: fixedScale?.max,
+              ticks: { color: "#9aa4ad", stepSize: fixedScale?.step },
+              grid: { color: "rgba(255,255,255,0.06)" }
+            }
+          },
+          plugins: {
+            legend: { labels: { color: "#e6e6e6" } },
+            chartBg: true
+          }
+        }
+      });
+    }
+
+    const chartTemp = createChart("chart_temp", "Temperature (°C)", "#ff2b2b");
+    const chartRH = createChart("chart_rh", "Relative Humidity (%)", "#ffb78c", { min: 0, max: 100, step: 10 });
+    const chartPressure = createChart("chart_pressure", "Pressure (hPa)", "#ff2b2b");
+    const chartLux = createChart("chart_lux", "Lux", "#ffb78c");
+    const chartBV = createChart("chart_bv", "Battery Voltage (V)", "#ff2b2b");
+    const chartBP = createChart("chart_bp", "Battery %", "#ffb78c", { min: 0, max: 100, step: 10 });
+    // const chartBA = createChart("chart_ba","Battery Current (A)","#ff2b2b",{min:0,max:1.0,step:0.05});
+
+    function autoScale(data, buffer = 0.06) {
+      const vals = data.filter(v => v !== null && v !== undefined);
+      if (vals.length === 0) return { min: 0, max: 1 };
+      const mn = Math.min(...vals);
+      const mx = Math.max(...vals);
+      const range = (mx - mn) || 1;
+      return { min: mn - range * buffer, max: mx + range * buffer };
+    }
+
+    const MAX_POINTS = 300;
+    const labels = [];
+    const tempData = [];
+    const rhData = [];
+    const pressData = [];
+    const luxData = [];
+    const bvData = [];
+    const bpData = [];
+    // const baData = [];
+
+    function pushPoint(label, t, rh, p, lux, bv, bp /*, ba*/) {
+      labels.push(label);
+      tempData.push(t ?? null);
+      rhData.push(rh ?? null);
+      pressData.push(p ?? null);
+      luxData.push(lux ?? null);
+      bvData.push(bv ?? null);
+      bpData.push(bp ?? null);
+      // baData.push(ba ?? null);
+
+      while (labels.length > MAX_POINTS) {
+        labels.shift();
+        tempData.shift();
+        rhData.shift();
+        pressData.shift();
+        luxData.shift();
+        bvData.shift();
+        bpData.shift();
+        // baData.shift();
+      }
+
+      // autoscale a few (optional)
+      Object.assign(chartTemp.options.scales.y, autoScale(tempData));
+      Object.assign(chartPressure.options.scales.y, autoScale(pressData));
+      Object.assign(chartLux.options.scales.y, autoScale(luxData));
+      Object.assign(chartBV.options.scales.y, autoScale(bvData));
+
+      chartTemp.data.labels = labels; chartTemp.data.datasets[0].data = tempData; chartTemp.update();
+      chartRH.data.labels = labels; chartRH.data.datasets[0].data = rhData; chartRH.update();
+      chartPressure.data.labels = labels; chartPressure.data.datasets[0].data = pressData; chartPressure.update();
+      chartLux.data.labels = labels; chartLux.data.datasets[0].data = luxData; chartLux.update();
+      chartBV.data.labels = labels; chartBV.data.datasets[0].data = bvData; chartBV.update();
+      chartBP.data.labels = labels; chartBP.data.datasets[0].data = bpData; chartBP.update();
+      // chartBA.data.labels = labels; chartBA.data.datasets[0].data = baData; chartBA.update();
+    }
+
+    // Table (prepend newest rows, keep last N)
+    const TABLE_KEEP = 60;
+    function prependRow(latest) {
+      const tb = $("sensor_table_body");
+      if (!tb) return;
+
+      // remove "Loading…" row if present
+      if (tb.rows.length === 1 && tb.rows[0].cells.length === 1) tb.innerHTML = "";
+
+      const flags = ((latest.uv_now ? ["UNDERVOLT"] : [])
+        .concat(latest.thr_now ? ["THROTTLED"] : [])
+        .join(", ")) || "OK";
+
+      const ts = latest._rx_ts || latest._rx_utc || latest.ts || "—";
+
+      const tr = document.createElement("tr");
+      tr.className = (tb.rows.length % 2 === 0) ? "even" : "odd";
+      tr.innerHTML = `
+      <td>${ts}</td>
+      <td>${fmt(latest.t_c, 2)}</td>
+      <td>${fmt(latest.rh, 1)}</td>
+      <td>${fmt(latest.p_hpa, 2)}</td>
+      <td>${fmt(latest.lux, 0)}</td>
+      <td>${latest.uvi ?? "—"}</td>
+      <td>${fmt(latest.cpu_c, 1)}</td>
+      <td>${fmt(latest.bv, 2)}</td>
+      <td>${(latest.bp ?? "—")}</td>
+      <td>${flags}</td>
+    `;
+      tb.prepend(tr);
+
+      while (tb.rows.length > TABLE_KEEP) {
+        tb.deleteRow(tb.rows.length - 1);
+      }
+    }
+
+    // Contact badge timer
+    let lastRxTime = null;
+    function updateAgeBadge() {
+      const badge = $("age_badge");
+      const lastTs = $("last_ts");
+      if (!lastRxTime) {
+        badge.textContent = "—";
+        badge.className = "badge";
+        lastTs.textContent = "—";
+        return;
+      }
+      const ageSec = Math.floor((Date.now() - lastRxTime.getTime()) / 1000);
+      badge.textContent = ageSec + "s ago";
+      badge.className = (ageSec <= 12) ? "badge good" : (ageSec <= 17) ? "badge warn" : "badge bad";
+      // lastTs already set when packet arrives
+    }
+
+    function updatePanels(latest) {
+      $("seq").textContent = (latest.seq ?? "—");
+
+      $("t_c").innerHTML = fmt(latest.t_c, 2) + " <small>°C</small>";
+      $("rh").innerHTML = fmt(latest.rh, 1) + " <small>%</small>";
+      $("p_hpa").innerHTML = fmt(latest.p_hpa, 2) + " <small>hPa</small>";
+      $("lux").innerHTML = fmt(latest.lux, 0) + " <small>lx</small>";
+      $("uvi").textContent = latest.uvi ?? "—";
+      $("cpu_c").innerHTML = fmt(latest.cpu_c, 1) + " <small>°C</small>";
+
+      $("bv").innerHTML = fmt(latest.bv, 2) + " <small>V</small>";
+      $("bp").innerHTML = (latest.bp ?? "—") + " <small>%</small>";
+
+      const flags = ((latest.uv_now ? ["UNDERVOLT"] : []).concat(latest.thr_now ? ["THROTTLED"] : []).join(", ")) || "OK";
+      $("pwr_flags").textContent = flags;
+
+      // Alerts box (basic)
+      const alerts = [];
+      if (latest.alerts && Array.isArray(latest.alerts) && latest.alerts.length) alerts.push(...latest.alerts);
+      if (flags !== "OK") alerts.push(flags);
+
+      if (alerts.length === 0) {
+        $("alerts_box").className = "ok";
+        $("alerts_box").textContent = "No alerts.";
+      } else {
+        $("alerts_box").className = "ok";
+        $("alerts_box").style.borderColor = "rgba(255,69,58,0.25)";
+        $("alerts_box").style.background = "rgba(255,69,58,0.12)";
+        $("alerts_box").textContent = alerts.join(" • ");
+      }
+    }
+
+    let lastPacketKey = null;
+
+    // Seed charts from /api/history once (so charts are full on load)
+    async function initHistory() {
+      try {
+        const res = await fetch("/api/history?n=300", { cache: "no-store" }).then(r => r.json());
+        const recs = (res.records || []).filter(r => r && typeof r === "object");
+        for (const r of recs) {
+          const lab = fmtTimeLabel(r.ts || r._rx_utc || r._rx_ts || "");
+          pushPoint(lab, r.t_c, r.rh, r.p_hpa, r.lux, r.bv, r.bp);
+        }
+      } catch (e) {
+        console.log("initHistory error:", e);
+      }
+    }
+
+    // Fast poll: latest + health (UI updates quickly)
+    async function refreshFast() {
+      try {
+        const q = "?t=" + Date.now();
+
+        const health = await fetch("/api/health" + q, { cache: "no-store" }).then(r => r.json());
+        $("server_time").textContent = health.server_time || "—";
+        if (health.run_id) $("run_id").textContent = health.run_id;
+
+        const latestRes = await fetch("/api/latest" + q, { cache: "no-store" }).then(r => r.json());
+        const latest = latestRes && latestRes.latest ? latestRes.latest : null;
+        if (!latest) return;
+
+        // Detect a new packet (prefer _rx_ts)
+        const key = latest._rx_ts || latest._rx_utc || latest.ts || null;
+        if (key && key !== lastPacketKey) {
+          lastPacketKey = key;
+          lastRxTime = new Date();
+          $("last_ts").textContent = key;
+
+          // push to charts + table
+          const lab = fmtTimeLabel(latest.ts || latest._rx_utc || latest._rx_ts || "");
+          pushPoint(lab, latest.t_c, latest.rh, latest.p_hpa, latest.lux, latest.bv, latest.bp);
+          prependRow(latest);
+          updatePanels(latest);
+        }
+
+        // always update badge even if no new data
+        updateAgeBadge();
+      } catch (e) {
+        console.log("refreshFast error:", e);
+      }
+    }
+
+    // Start
+    (async () => {
+      await initHistory();
+      refreshFast();
+      setInterval(refreshFast, 250);     // UI feels instant
+      setInterval(updateAgeBadge, 1000); // smooth badge ticking
+    })();
+  </script>
+
+</body>
+
+</html>
