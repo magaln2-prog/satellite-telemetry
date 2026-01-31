@@ -8,6 +8,8 @@ Main idea:
 - Build a full record locally and log it (JSONL).
 - Build a compact packet for radio.
 - Send compact packet using TM-framed fragments (robust against fragmentation).
+
+This flight specifically is meant to track the time it takes for this run
 """
 
 # -------------------------
