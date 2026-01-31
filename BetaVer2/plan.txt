@@ -1,0 +1,216 @@
+BETA OPTIMIZATION & DESIGN RULES
+================================
+
+Project Stage
+-------------
+Version: Beta (Prototype)
+Goal: Optimize performance and reliability without breaking functionality.
+
+This document describes:
+  - What will be changed in the Beta version
+  - The order in which changes will be made
+  - How new work will be tested and debugged
+  - Design rules to avoid unnecessary bugs and regressions
+
+
+--------------------------------
+PHASE 0 — FREEZE THE BETA
+--------------------------------
+Goal:
+  Preserve a working fallback version at all times.
+
+Actions:
+  - Keep main branch stable and demo-ready
+  - Keep beta branch as the current working prototype
+  - Tag current version as: beta-v0.1
+  - Do not optimize directly on main
+
+Test:
+  - Fresh boot → start receiver → start dashboard → UI shows data
+
+
+--------------------------------
+PHASE 1 — MEASURE BEFORE CHANGING
+--------------------------------
+Goal:
+  Understand what is slow before optimizing.
+
+Add metrics for:
+  - API response time
+  - Chart redraw frequency
+  - CPU usage on the Raspberry Pi
+  - Packet arrival rate and CRC failures
+
+Definition of “faster”:
+  - UI updates within 1 second of packet arrival
+  - No UI blanking
+  - CPU usage remains reasonable
+  - History remains responsive over time
+
+Test:
+  - Run system for several minutes
+  - Record baseline performance numbers
+
+
+--------------------------------
+PHASE 2 — CACHE LATEST TELEMETRY (BIGGEST WIN)
+--------------------------------
+Goal:
+  Reduce disk reads and JSON parsing overhead.
+
+Changes:
+  - Cache latest telemetry in memory inside dashboard.py
+  - Track file modification time (mtime)
+  - Only re-read latest.json if the file actually changes
+  - Share cached data across all API endpoints
+
+Test:
+  - Verify UI still updates on new telemetry
+  - Confirm latest.json is not read repeatedly
+  - Log cache hits vs cache refreshes
+
+
+--------------------------------
+PHASE 3 — MERGE API ENDPOINTS
+--------------------------------
+Goal:
+  Reduce network and server overhead.
+
+Changes:
+  - Replace /api/latest and /api/health
+  - Create a single /api/state endpoint
+  - Return telemetry + health + timing in one response
+
+Test:
+  - UI still shows sensor data and contact status
+  - Network requests are reduced
+  - No loss of functionality
+
+
+--------------------------------
+PHASE 4 — LIMIT CHART REDRAWS
+--------------------------------
+Goal:
+  Improve UI smoothness and reduce CPU load.
+
+Changes:
+  - Update charts only when a new packet arrives
+  - Rate-limit chart redraws (2–5 Hz)
+  - Allow text fields and badges to update more frequently
+
+Test:
+  - Charts remain responsive
+  - CPU usage decreases
+  - No visual stutter or freezing
+
+
+--------------------------------
+PHASE 5 — OPTIMIZE HISTORY HANDLING
+--------------------------------
+Goal:
+  Keep history fast even as files grow.
+
+Options:
+  - Maintain an in-memory rolling buffer (deque)
+  - Or tail-read from the end of history.jsonl
+
+Test:
+  - Simulate or run long sessions
+  - /api/history response time remains stable
+
+
+--------------------------------
+PHASE 6 — HARDEN RECEIVER PERFORMANCE
+--------------------------------
+Goal:
+  Improve reliability and reduce silent failures.
+
+Changes:
+  - Reduce hot-path logging
+  - Add fragment timeouts and cleanup
+  - Add structured debug counters
+  - Ensure partial packets do not accumulate indefinitely
+
+Test:
+  - Introduce packet loss or interference
+  - Receiver continues functioning
+  - latest.json continues updating when possible
+
+
+--------------------------------
+PHASE 7 — REPLACE BATTERY DATA WITH IMU
+--------------------------------
+Goal:
+  Finalize correct sensor schema.
+
+Changes:
+  - Replace battery fields with IMU data
+  - Accelerometer: ax, ay, az
+  - Magnetometer: mx, my, mz
+  - (Optional) Gyroscope: gx, gy, gz
+  - Update flight, receiver, and UI consistently
+
+Test:
+  - Use fake telemetry generator first
+  - Validate UI before running on hardware
+
+
+================================
+TESTING & DEBUGGING PROCESS
+================================
+
+Golden Rule:
+  No change goes directly to hardware first.
+
+Test Ladder (always in order):
+  1) Unit-level logic tests
+  2) File-based fake telemetry tests
+  3) Receiver-only testing
+  4) Full system integration
+  5) Hardware and field testing
+
+If something breaks, identify the layer before debugging.
+
+
+================================
+DESIGN RULES TO AVOID BUGS
+================================
+
+Environment & Addressing Rules:
+  - Never hardcode device paths
+  - Never hardcode I2C addresses
+  - Use configuration or environment variables
+  - Always build file paths relative to the script location
+  - Use UTC timestamps only
+
+Schema & Protocol Rules:
+  - Add a schema version field to telemetry
+  - Never silently rename keys
+  - Maintain a TELEMETRY_SCHEMA document
+  - Support old and new keys temporarily during transitions
+
+Development Rules:
+  - One feature per branch
+  - Small, reversible commits
+  - No broken merges
+  - Every PR must explain how to test changes
+
+Debugging Rules:
+  - Use DEBUG modes instead of random print statements
+  - Log structured, meaningful messages
+  - Keep known-good test telemetry files in the repo
+
+
+================================
+DEFINITION OF DONE
+================================
+A change is complete only if:
+  - It works in simulation
+  - It works with real receiver input
+  - It does not increase CPU usage significantly
+  - It does not break UI stability
+  - It has a clear rollback path
+
+
+End of File
+-----------
