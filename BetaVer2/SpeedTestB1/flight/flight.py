@@ -420,6 +420,9 @@ def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, An
         ensure_ascii=False
     ).encode("utf-8")
 
+    blob_len = len(blob)  # NEW: payload size indicator
+
+
     # Reserve 3 bytes for fixed-address header [DEST_H][DEST_L][FREQ_OFF]
     max_app = lora.max_app_payload_bytes(header_len=3)
 
@@ -489,6 +492,7 @@ def send_compact_radio_packet(lora: Any, packet: Dict[str, Any]) -> Dict[str, An
                 "msg_id": msg_id,
                 "frags_total": frag_tot,
                 "frags_sent": sent,
+                "payload_bytes": blob_len,   # NEW
             }
 
     return {
@@ -661,6 +665,8 @@ def main() -> None:
     try:
         while True:
             loop_start_time_s = time.time()
+            loop_start_mono = time.monotonic()
+
             now_time_s = loop_start_time_s
             sequence_id += 1
 
@@ -728,7 +734,16 @@ def main() -> None:
 
             # ---- LoRa TX ----
             radio_packet = build_compact_radio_packet(record)
-            record["radio"] = send_compact_radio_packet(lora, radio_packet)
+
+            record["tx_utc"] = utc_timestamp_iso()   # NEW: time right before we attempt TX (helps end-to-end delay)
+
+            tx_start_mono = time.monotonic()         # NEW: measure how long TX takes
+            radio_result = send_compact_radio_packet(lora, radio_packet)
+            tx_dt_ms = (time.monotonic() - tx_start_mono) * 1000.0
+
+            record["radio"] = radio_result
+            record["radio"]["tx_dt_ms"] = round(tx_dt_ms, 2)   # NEW: how expensive radio send was
+
 
             # ---- JSONL log ----
             log_error = append_jsonl_safe(telemetry_log_path, record)
@@ -743,6 +758,11 @@ def main() -> None:
                 next_cleanup_time_s = time.time() + 60
 
             # ---- Console status line ----
+            loop_dt_ms = (time.monotonic() - loop_start_mono) * 1000.0 
+            record["perf"] = {
+                "loop_dt_ms": round(loop_dt_ms,2),
+                "target_hz":telemetry_hz
+            }
             error_keys = list(record.get("errors", {}).keys())
             batt_v = (record.get("power", {}) or {}).get("battery_v")
             batt_pct = (record.get("power", {}) or {}).get("battery_pct")
@@ -751,6 +771,9 @@ def main() -> None:
 
             print(
                 f"seq={sequence_id} time={record['timestamp_utc']} "
+                f"loop={record['perf']['loop_dt_ms']}ms "          # NEW
+                f"tx_ms={record['radio'].get('tx_dt_ms')} "        # NEW
+                f"frags={record['radio'].get('frags_total')} "     # already returned by send function
                 f"bat={batt_v}V {batt_pct}% img={img_cap} "
                 f"radio_ok={tx_ok} errors={error_keys}"
             )
