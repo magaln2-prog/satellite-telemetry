@@ -82,6 +82,13 @@ LORA_TX_GAP_S = 0.20
 # For 900MHz modules: offset = freq_mhz - 850
 LORA_BASE_FREQ_MHZ = 850
 
+# -------------------------
+# Telemetry versioning
+# -------------------------
+SCHEMA_VER = 1
+BUILD_VER = "beta-v0.1"
+
+
 
 # --------------------------------------------------------------------------------------------------
 # Time helpers
@@ -684,6 +691,8 @@ def main() -> None:
             sequence_id += 1
 
             record: Dict[str, Any] = {
+                "schema_ver": SCHEMA_VER,
+                "build_ver": BUILD_VER,
                 "timestamp_utc": utc_timestamp_iso(),
                 "sequence_id": sequence_id,
             }
