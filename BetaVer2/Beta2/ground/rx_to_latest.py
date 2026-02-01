@@ -2,19 +2,16 @@
 """
 rx_to_latest.py (GROUND)
 
-- Receives LoRa UART bytes
-- Parses TM frames (protocol_tm.py)
-- Reassembles fragments by msg_id
-- Decodes binary payloads (FAST/FULL)
-- Merges into a "latched latest" dict so the dashboard always has all categories
+Optimization implemented:
+4) Throttle disk writes of latest.json:
+   - Update LAST_LATEST in memory on every decoded packet
+   - Only write latest.json at most once every LATEST_WRITE_MIN_PERIOD_S
 
-Extras for index.html compatibility:
-- Adds uv_now + thr_now booleans derived from pwr_flags bits
-- Adds ts (ISO string) + _rx_ts
-- Builds alerts list from battery thresholds + flags
-
-History:
-- Append only FULL packets to history.jsonl (keeps history smaller)
+Still:
+- TM parsing + reassembly
+- Binary FAST/FULL decode
+- Merge into latched state so dashboard stays populated
+- Append only FULL packets to history.jsonl
 """
 
 import json
@@ -61,19 +58,20 @@ LORA_CRYPT = 0
 LORA_RSSI = True
 LORA_AIR_SPEED = 2400
 LORA_NET_ID = 0
-
 RX_TIMEOUT_S = 5.0
 
 # ----------------------------
-# Timeouts
+# Timeouts + throttles
 # ----------------------------
 NO_CONTACT_AFTER_S = 30.0
 REASSEMBLY_TTL_S = 60.0
 RADIO_SETTLE_S = 2.0
 SERIAL_ERROR_BACKOFF_S = 0.5
 
+LATEST_WRITE_MIN_PERIOD_S = 0.20  # <= 5 writes/sec (tune: 0.10 for 10 Hz, 0.25 for 4 Hz)
+
 # ----------------------------
-# Alerts thresholds (match flight-ish)
+# Alerts thresholds
 # ----------------------------
 LOW_BATT_PCT = 20
 CRIT_BATT_PCT = 10
@@ -88,8 +86,8 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 DEBUG = os.environ.get("RX_DEBUG", "0").lower() not in ("0", "", "false", "no", "off")
 
-# Latched merged view (FAST merges into last FULL so UI stays populated)
 LAST_LATEST: dict = {}
+_last_latest_write_s = 0.0
 
 
 def dbg(*args: object) -> None:
@@ -130,49 +128,8 @@ def ensure_latest_initialized() -> None:
         atomic_write_json(LATEST_PATH, {"status": "NO DATA YET", "_rx_utc": utc_now(), "_rx_ts": utc_now(), "_radio": None})
 
 
-def _pending_gc(pending: dict, now_s: float) -> None:
-    dead = []
-    for msg_id, st in pending.items():
-        if (now_s - st["t0"]) > REASSEMBLY_TTL_S:
-            dead.append(msg_id)
-    for msg_id in dead:
-        del pending[msg_id]
-
-
-def init_radio():
-    if not HAVE_RADIO:
-        return None, "sx126x import failed"
-
-    try:
-        lora = sx126x.sx126x(
-            serial_num=LORA_PORT,
-            freq=LORA_FREQ_MHZ,
-            addr=LORA_ADDR,
-            power=LORA_POWER_DBM,
-            rssi=LORA_RSSI,
-            air_speed=LORA_AIR_SPEED,
-            net_id=LORA_NET_ID,
-            buffer_size=LORA_BUFFER_SIZE,
-            crypt=LORA_CRYPT,
-            relay=False,
-            lbt=False,
-            wor=False,
-        )
-        return lora, None
-    except Exception as e:
-        return None, repr(e)
-
-
 def flags_to_bools(pwr_flags: int | None) -> tuple[bool, bool]:
-    """
-    Matches flight.py _pack_flags_byte layout:
-      bit0 undervoltage_now
-      bit1 throttled_now
-      bit2 freq_capped_now (unused by index.html)
-      ...
-    index.html expects:
-      uv_now, thr_now
-    """
+    # Matches flight.py _pack_flags_byte
     if pwr_flags is None:
         return False, False
     try:
@@ -186,8 +143,6 @@ def flags_to_bools(pwr_flags: int | None) -> tuple[bool, bool]:
 
 def compute_alerts(latest: dict) -> list[str]:
     alerts: list[str] = []
-
-    # Battery-based alerts
     try:
         bp = latest.get("bp")
         if bp is not None:
@@ -206,15 +161,53 @@ def compute_alerts(latest: dict) -> list[str]:
     except Exception:
         pass
 
-    # Flags alerts (index.html also shows these, but we keep alerts populated)
-    uv_now = bool(latest.get("uv_now"))
-    thr_now = bool(latest.get("thr_now"))
-    if uv_now:
+    if latest.get("uv_now"):
         alerts.append("UNDERVOLT")
-    if thr_now:
+    if latest.get("thr_now"):
         alerts.append("THROTTLED")
 
     return alerts
+
+
+def maybe_write_latest(now_s: float) -> None:
+    """Throttle disk writes of latest.json."""
+    global _last_latest_write_s
+    if (now_s - _last_latest_write_s) < LATEST_WRITE_MIN_PERIOD_S:
+        return
+    atomic_write_json(LATEST_PATH, LAST_LATEST)
+    _last_latest_write_s = now_s
+
+
+def _pending_gc(pending: dict, now_s: float) -> None:
+    dead = []
+    for msg_id, st in pending.items():
+        if (now_s - st["t0"]) > REASSEMBLY_TTL_S:
+            dead.append(msg_id)
+    for msg_id in dead:
+        del pending[msg_id]
+
+
+def init_radio():
+    if not HAVE_RADIO:
+        return None, "sx126x import failed"
+    try:
+        lora = sx126x.sx126x(
+            serial_num=LORA_PORT,
+            freq=LORA_FREQ_MHZ,
+            addr=LORA_ADDR,
+            power=LORA_POWER_DBM,
+            rssi=LORA_RSSI,
+            air_speed=LORA_AIR_SPEED,
+            net_id=LORA_NET_ID,
+            buffer_size=LORA_BUFFER_SIZE,
+            crypt=LORA_CRYPT,
+            relay=False,
+            lbt=False,
+            wor=False,
+        )
+        return lora, None
+    except Exception as e:
+        return None, repr(e)
 
 
 def main() -> None:
@@ -237,7 +230,6 @@ def main() -> None:
     while True:
         now = time.time()
 
-        # Read one chunk
         try:
             payload, meta = lora.recv_packet(timeout=RX_TIMEOUT_S)
             raw = payload if payload else b""
@@ -249,13 +241,13 @@ def main() -> None:
         if raw:
             last_rx_bytes_time = now
 
-        # Contact heartbeat (do NOT blank UI; keep last values latched)
+        # NO CONTACT handling (still latched; just update status)
         if (now - last_rx_bytes_time) > NO_CONTACT_AFTER_S:
             LAST_LATEST.setdefault("status", "NO CONTACT")
             LAST_LATEST["_rx_utc"] = utc_now()
             LAST_LATEST["_rx_ts"] = LAST_LATEST["_rx_utc"]
             LAST_LATEST["_radio"] = meta or None
-            atomic_write_json(LATEST_PATH, LAST_LATEST)
+            maybe_write_latest(now)
 
         if not raw:
             continue
@@ -282,7 +274,6 @@ def main() -> None:
 
             st["parts"][frag_idx] = frag_payload
 
-            # Complete message reassembled
             if len(st["parts"]) == st["tot"]:
                 full = b"".join(st["parts"][i] for i in range(st["tot"]))
                 del pending[msg_id]
@@ -295,30 +286,30 @@ def main() -> None:
                 # Merge into latched latest
                 LAST_LATEST.update(fields)
 
-                # Add timestamps compatible with index.html
-                # Prefer device ts_unix -> ts ISO, but always include _rx_utc/_rx_ts
+                # Time fields for index.html
                 ts_iso = unix_to_iso(LAST_LATEST.get("ts_unix"))
                 if ts_iso:
                     LAST_LATEST["ts"] = ts_iso
                 LAST_LATEST["_rx_utc"] = utc_now()
                 LAST_LATEST["_rx_ts"] = LAST_LATEST["_rx_utc"]
 
-                # Decode flags -> booleans expected by index.html
+                # Flag booleans for UI
                 uv_now, thr_now = flags_to_bools(LAST_LATEST.get("pwr_flags"))
                 LAST_LATEST["uv_now"] = uv_now
                 LAST_LATEST["thr_now"] = thr_now
 
-                # Build alerts list (optional but nice)
+                # Alerts
                 LAST_LATEST["alerts"] = compute_alerts(LAST_LATEST)
 
-                # Metadata
+                # Meta
                 LAST_LATEST["_radio"] = meta or None
                 LAST_LATEST["_pkt"] = "full" if pkt_type == PKT_FULL else "fast"
                 LAST_LATEST["status"] = "CONTACT"
 
-                atomic_write_json(LATEST_PATH, LAST_LATEST)
+                # Throttled write
+                maybe_write_latest(now)
 
-                # Only append FULL to history
+                # History only on FULL
                 if pkt_type == PKT_FULL:
                     append_history(LAST_LATEST)
 
@@ -335,4 +326,3 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nRX stopped.")
-

@@ -2,16 +2,21 @@
 """
 flight.py (FLIGHT)
 
-- Builds a full record locally and logs JSONL (for debugging / post-flight).
-- Sends compact *binary* telemetry over LoRa using TM-framed fragments.
-- FAST packet every loop (smooth UI).
-- FULL packet every FULL_PERIOD_S seconds (all categories populated).
+Optimizations implemented:
+1) Different retry policy:
+   - FAST packets: 1 TX copy per fragment
+   - FULL packets: 2 TX copies per fragment
 
-Note: We map ltr390 "uv_raw" into the UVI slot to keep the dashboard populated.
+3) Threshold-gated FULL:
+   - Send FULL only when values change beyond thresholds OR after FULL_MAX_PERIOD_S
+
+Still:
+- FAST packet every loop (smooth UI)
+- FULL refresh guaranteed (max period)
+- Binary payloads + TM fragment framing
 """
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict
@@ -71,8 +76,35 @@ LORA_TX_GAP_S = 0.20
 LORA_BASE_FREQ_MHZ = 850
 
 
+# -------------------------
+# TX rates
+# -------------------------
+FAST_HZ = 2.0                 # FAST rate (packets/sec)
+FULL_MAX_PERIOD_S = 5.0       # Guaranteed FULL at least this often
+
+# Thresholds for “changed enough” to trigger FULL early
+THRESH = {
+    "t_c": 0.10,      # °C
+    "rh": 1.0,        # %
+    "p_hpa": 0.3,     # hPa
+    "lux_rel": 0.10,  # 10% change OR
+    "lux_abs": 30.0,  # 30 lux absolute change
+    "uvi": 0.5,       # (mapped uv_raw) change
+    "cpu_c": 0.3,     # °C
+    "bv": 0.02,       # V
+    "bp": 1.0,        # %
+    "flags": 1,       # any change triggers
+}
+
+
 def utc_timestamp_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def sleep_to_rate(loop_start_time_s: float, hz: float) -> None:
+    period_s = 1.0 / max(0.1, hz)
+    elapsed_s = time.time() - loop_start_time_s
+    time.sleep(max(0.0, period_s - elapsed_s))
 
 
 def append_jsonl_safe(path: Path, record: Dict[str, Any]) -> str | None:
@@ -82,33 +114,6 @@ def append_jsonl_safe(path: Path, record: Dict[str, Any]) -> str | None:
         return None
     except Exception as e:
         return repr(e)
-
-
-def sleep_to_rate(loop_start_time_s: float, telemetry_hz: float) -> None:
-    period_s = 1.0 / telemetry_hz
-    elapsed_s = time.time() - loop_start_time_s
-    time.sleep(max(0.0, period_s - elapsed_s))
-
-
-def cleanup_folder_to_mb(folder: Path, max_mb: int) -> int:
-    if not folder.exists():
-        return 0
-    max_bytes = max_mb * 1024 * 1024
-    files = [p for p in folder.rglob("*") if p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime)
-
-    total = sum(p.stat().st_size for p in files)
-    deleted = 0
-    while total > max_bytes and files:
-        p = files.pop(0)
-        try:
-            sz = p.stat().st_size
-            p.unlink()
-            total -= sz
-            deleted += 1
-        except Exception:
-            pass
-    return deleted
 
 
 # -------------------------
@@ -140,14 +145,13 @@ def read_ups_status(ups_bus: SMBus) -> tuple[Dict[str, Any], str | None]:
         rem_mah = ups_read_u16(ups_bus, 0x26)
         rem_min = ups_read_u16(ups_bus, 0x28)
 
-        power_status = {
+        return {
             "battery_v": batt_mv / 1000.0,
             "battery_a": batt_ma / 1000.0,
             "battery_pct": batt_pct,
             "remaining_mah": rem_mah,
             "remaining_min": rem_min,
-        }
-        return power_status, None
+        }, None
     except Exception as e:
         return {}, repr(e)
 
@@ -187,7 +191,7 @@ def read_pi_throttle_flags() -> tuple[Dict[str, Any], str | None]:
     try:
         raw_hex = out.split("=")[1]
         v = int(raw_hex, 16)
-        flags = {
+        return {
             "raw": raw_hex,
             "undervoltage_now": bool(v & (1 << 0)),
             "freq_capped_now": bool(v & (1 << 1)),
@@ -195,8 +199,7 @@ def read_pi_throttle_flags() -> tuple[Dict[str, Any], str | None]:
             "undervoltage_has": bool(v & (1 << 16)),
             "freq_capped_has": bool(v & (1 << 17)),
             "throttled_has": bool(v & (1 << 18)),
-        }
-        return flags, None
+        }, None
     except Exception as e:
         return {}, repr(e)
 
@@ -255,7 +258,7 @@ def init_lora() -> tuple[Any | None, str | None]:
 
 
 # -------------------------
-# Radio TX over TM framing
+# Radio TX helpers
 # -------------------------
 def compute_freq_off(freq_mhz: int) -> int:
     off = int(freq_mhz) - int(LORA_BASE_FREQ_MHZ)
@@ -286,14 +289,15 @@ def _pack_flags_byte(pi_throttle: Dict[str, Any]) -> int:
     return b & 0xFF
 
 
-def send_blob_over_tm(lora: Any, msg_id: int, blob: bytes) -> Dict[str, Any]:
+def send_blob_over_tm(lora: Any, msg_id: int, blob: bytes, frag_tx_copies: int) -> Dict[str, Any]:
+    """Send bytes over TM fragmentation. frag_tx_copies controls reliability."""
     if lora is None:
         return {"enabled": False, "tx_success": False, "tx_error": "lora_none"}
 
     # Reserve 3 bytes for [DEST_H][DEST_L][FREQ_OFF]
     max_app = lora.max_app_payload_bytes(header_len=3)
 
-    # Keep fragments small
+    # Conservative fragment sizing
     TARGET_MAX_APP = 64
     max_app = min(max_app, TARGET_MAX_APP)
 
@@ -306,7 +310,7 @@ def send_blob_over_tm(lora: Any, msg_id: int, blob: bytes) -> Dict[str, Any]:
 
     sent = 0
     last_err = None
-    FRAG_TX_COPIES = 2
+    copies = max(1, int(frag_tx_copies))
 
     for frag_idx, chunk in enumerate(chunks):
         try:
@@ -317,7 +321,7 @@ def send_blob_over_tm(lora: Any, msg_id: int, blob: bytes) -> Dict[str, Any]:
         frame = build_fixed_frame(LORA_DEST_ADDR, tm_payload)
 
         ok = False
-        for _ in range(FRAG_TX_COPIES):
+        for _ in range(copies):
             try:
                 lora.send(frame)
                 sent += 1
@@ -328,9 +332,15 @@ def send_blob_over_tm(lora: Any, msg_id: int, blob: bytes) -> Dict[str, Any]:
             time.sleep(LORA_TX_GAP_S)
 
         if not ok:
-            return {"enabled": True, "tx_success": False, "tx_error": last_err or "tx_failed", "frags_total": frag_tot, "frags_sent": sent}
+            return {
+                "enabled": True,
+                "tx_success": False,
+                "tx_error": last_err or "tx_failed",
+                "frags_total": frag_tot,
+                "frags_sent": sent,
+            }
 
-    return {"enabled": True, "tx_success": True, "frags_total": frag_tot, "frags_sent": sent}
+    return {"enabled": True, "tx_success": True, "frags_total": frag_tot, "frags_sent": sent, "copies": copies}
 
 
 # -------------------------
@@ -422,11 +432,11 @@ def read_sensors(sensors: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str
 
     if imu_sensor is not None:
         try:
-            accel_x, accel_y, accel_z = imu_sensor.acceleration
-            gyro_x, gyro_y, gyro_z = imu_sensor.gyro
+            ax, ay, az = imu_sensor.acceleration
+            gx, gy, gz = imu_sensor.gyro
             data["imu"] = {
-                "accel_mps2": [float(accel_x), float(accel_y), float(accel_z)],
-                "gyro_rps": [float(gyro_x), float(gyro_y), float(gyro_z)],
+                "accel_mps2": [float(ax), float(ay), float(az)],
+                "gyro_rps": [float(gx), float(gy), float(gz)],
             }
         except Exception as e:
             errors["icm20948"] = repr(e)
@@ -435,60 +445,62 @@ def read_sensors(sensors: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str
 
 
 # -------------------------
-# Camera capture (optional)
+# FULL gating helpers
 # -------------------------
-def capture_image_jpeg(images_dir: Path, seq: int) -> tuple[Dict[str, Any], str | None]:
-    out_path = images_dir / f"img_{seq:06d}.jpg"
-    cmd = [
-        "rpicam-still",
-        "-n",
-        "--width", str(IMG_W),
-        "--height", str(IMG_H),
-        "--quality", str(IMG_Q),
-        "-o", str(out_path),
-        "--timeout", str(int(CAMERA_TIMEOUT_S * 1000)),
-    ]
+def _abs_delta(a, b) -> float:
     try:
-        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        sz = out_path.stat().st_size if out_path.exists() else None
-        return {"path": str(out_path), "bytes": sz}, None
-    except Exception as e:
-        try:
-            if out_path.exists():
-                out_path.unlink()
-        except Exception:
-            pass
-        return {"path": None, "bytes": None}, repr(e)
+        return abs(float(a) - float(b))
+    except Exception:
+        return float("inf")
 
 
-def create_run_directories(base_dir: Path) -> Dict[str, Path]:
-    run_id_utc = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    run_dir = base_dir / "runs" / run_id_utc
-    logs_dir = run_dir / "logs"
-    images_dir = run_dir / "images"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    images_dir.mkdir(parents=True, exist_ok=True)
-    return {"run_dir": run_dir, "logs_dir": logs_dir, "images_dir": images_dir}
+def _lux_changed(lux_now, lux_prev) -> bool:
+    try:
+        n = float(lux_now)
+        p = float(lux_prev)
+        if _abs_delta(n, p) >= THRESH["lux_abs"]:
+            return True
+        # relative threshold (avoid divide by ~0)
+        denom = max(1.0, abs(p))
+        return (abs(n - p) / denom) >= THRESH["lux_rel"]
+    except Exception:
+        return True
+
+
+def should_send_full(now_vals: dict, prev_vals: dict) -> bool:
+    """Return True if FULL should be sent due to threshold changes."""
+    if not prev_vals:
+        return True
+
+    if _abs_delta(now_vals.get("t_c"), prev_vals.get("t_c")) >= THRESH["t_c"]:
+        return True
+    if _abs_delta(now_vals.get("rh"), prev_vals.get("rh")) >= THRESH["rh"]:
+        return True
+    if _abs_delta(now_vals.get("p_hpa"), prev_vals.get("p_hpa")) >= THRESH["p_hpa"]:
+        return True
+    if _lux_changed(now_vals.get("lux"), prev_vals.get("lux")):
+        return True
+    if _abs_delta(now_vals.get("uvi"), prev_vals.get("uvi")) >= THRESH["uvi"]:
+        return True
+    if _abs_delta(now_vals.get("cpu_c"), prev_vals.get("cpu_c")) >= THRESH["cpu_c"]:
+        return True
+    if _abs_delta(now_vals.get("bv"), prev_vals.get("bv")) >= THRESH["bv"]:
+        return True
+    if _abs_delta(now_vals.get("bp"), prev_vals.get("bp")) >= THRESH["bp"]:
+        return True
+    if int(now_vals.get("flags") or 0) != int(prev_vals.get("flags") or 0):
+        return True
+
+    return False
 
 
 # -------------------------
 # Main loop
 # -------------------------
 def main() -> None:
-    telemetry_hz = 1.0
-
-    # FULL packet period (FAST goes every loop)
-    FULL_PERIOD_S = 5.0
-    last_full_tx_s = 0.0
-
     base_dir = Path(__file__).resolve().parent
-    max_log_mb = 200
-    max_image_mb = 500
-
-    dirs = create_run_directories(base_dir)
-    logs_dir = dirs["logs_dir"]
-    images_dir = dirs["images_dir"]
-
+    logs_dir = base_dir / "runs" / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
     telemetry_log_path = logs_dir / "telemetry.jsonl"
 
     i2c = init_i2c_bus()
@@ -502,19 +514,21 @@ def main() -> None:
     if lora_err:
         print("LoRa init error:", lora_err)
 
-    sequence_id = 0
-    last_image_time_s = 0.0
-    next_cleanup_time_s = time.time() + 60
+    seq = 0
+    last_full_tx_s = 0.0
+    prev_full_vals: dict = {}
+
+    print("Flight running...")
 
     try:
         while True:
-            loop_start_time_s = time.time()
-            now_time_s = loop_start_time_s
-            sequence_id += 1
+            loop_start = time.time()
+            seq += 1
+            now_unix = int(loop_start)
 
             record: Dict[str, Any] = {
                 "timestamp_utc": utc_timestamp_iso(),
-                "sequence_id": sequence_id,
+                "sequence_id": seq,
                 "environment": {},
                 "uv_light": {},
                 "light": {},
@@ -522,7 +536,6 @@ def main() -> None:
                 "power": {},
                 "alerts": [],
                 "pi_health": {},
-                "image": {"captured": False, "seq": None, "path": None, "bytes": None, "error": None},
             }
 
             sensor_data, sensor_errors = read_sensors(sensors)
@@ -549,30 +562,13 @@ def main() -> None:
                 for k, v in pi_errs.items():
                     record["errors"][f"pi_{k}"] = v
 
-            image_period_s = 60 if "BATT_CRIT_PCT" in record.get("alerts", []) else IMAGE_PERIOD_S
-            if (now_time_s - last_image_time_s) >= image_period_s:
-                image_info, img_err = capture_image_jpeg(images_dir, sequence_id)
-                record["image"].update({
-                    "seq": sequence_id,
-                    "path": image_info.get("path"),
-                    "bytes": image_info.get("bytes"),
-                    "captured": (img_err is None) and bool(image_info.get("path")),
-                    "error": img_err,
-                })
-                if img_err:
-                    record.setdefault("errors", {})
-                    record["errors"]["camera"] = img_err
-                last_image_time_s = now_time_s
-
-            # ---- LoRa TX (FAST + FULL) ----
-            now_unix = int(now_time_s)
+            # ---- Extract values for TX ----
             env = record.get("environment", {}) or {}
             power = record.get("power", {}) or {}
             light = record.get("light", {}) or {}
             uv = record.get("uv_light", {}) or {}
             pi = record.get("pi_health", {}) or {}
 
-            seq = int(record.get("sequence_id") or 0)
             t_c = env.get("temperature_c")
             rh = env.get("humidity_pct")
             p_hpa = env.get("pressure_hpa")
@@ -583,44 +579,42 @@ def main() -> None:
             bp = power.get("battery_pct")
             flags = _pack_flags_byte((pi.get("throttle_flags") or {}))
 
+            # FAST always (copies=1)
             fast_blob = pack_fast(seq, now_unix, t_c, rh, p_hpa, lux, uvi)
-            tx_fast = send_blob_over_tm(lora, seq, fast_blob)
+            tx_fast = send_blob_over_tm(lora, seq, fast_blob, frag_tx_copies=1)
 
-            if (now_time_s - last_full_tx_s) >= FULL_PERIOD_S:
+            # FULL: threshold gated OR max period (copies=2)
+            now_full_vals = {
+                "t_c": t_c, "rh": rh, "p_hpa": p_hpa, "lux": lux, "uvi": uvi,
+                "cpu_c": cpu_c, "bv": bv, "bp": bp, "flags": flags
+            }
+
+            force_due_to_time = (loop_start - last_full_tx_s) >= FULL_MAX_PERIOD_S
+            force_due_to_change = should_send_full(now_full_vals, prev_full_vals)
+
+            if force_due_to_time or force_due_to_change:
                 full_blob = pack_full(seq, now_unix, t_c, rh, p_hpa, lux, uvi, cpu_c, bv, bp, flags)
-                tx_full = send_blob_over_tm(lora, seq, full_blob)
-                last_full_tx_s = now_time_s
+                tx_full = send_blob_over_tm(lora, seq, full_blob, frag_tx_copies=2)
+                last_full_tx_s = loop_start
+                prev_full_vals = now_full_vals
             else:
                 tx_full = None
 
             record["radio"] = {"fast": tx_fast, "full": tx_full}
 
-            # ---- JSONL log ----
             log_error = append_jsonl_safe(telemetry_log_path, record)
             if log_error:
                 record.setdefault("errors", {})
                 record["errors"]["jsonl_log"] = log_error
 
-            # ---- Periodic cleanup ----
-            if time.time() >= next_cleanup_time_s:
-                cleanup_folder_to_mb(logs_dir, max_log_mb)
-                cleanup_folder_to_mb(images_dir, max_image_mb)
-                next_cleanup_time_s = time.time() + 60
-
-            # ---- Console status ----
-            error_keys = list(record.get("errors", {}).keys())
-            batt_v = (record.get("power", {}) or {}).get("battery_v")
-            batt_pct = (record.get("power", {}) or {}).get("battery_pct")
-            tx_ok = (record.get("radio", {}) or {}).get("fast", {}).get("tx_success")
-            img_cap = (record.get("image", {}) or {}).get("captured")
-
+            # Print minimal status
             print(
-                f"seq={sequence_id} time={record['timestamp_utc']} "
-                f"bat={batt_v}V {batt_pct}% img={img_cap} "
-                f"radio_ok={tx_ok} errors={error_keys}"
+                f"seq={seq} radio_fast={tx_fast.get('tx_success')} "
+                f"full_sent={'yes' if tx_full else 'no'} "
+                f"copies_fast=1 copies_full=2"
             )
 
-            sleep_to_rate(loop_start_time_s, telemetry_hz)
+            sleep_to_rate(loop_start, FAST_HZ)
 
     finally:
         try:
