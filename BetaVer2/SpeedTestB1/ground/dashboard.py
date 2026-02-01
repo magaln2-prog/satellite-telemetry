@@ -24,6 +24,7 @@ Expected telemetry keys (schema-tolerant):
 
 import json
 import os
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -230,6 +231,8 @@ def api_health():
 
     The UI can map age thresholds → ONLINE / STALE / NO CONTACT.
     """
+    t0 = time.perf_counter()
+
     now_dt = datetime.now(timezone.utc)
     now_iso = now_dt.isoformat()
 
@@ -265,6 +268,9 @@ def api_health():
             latest_age_s = (now_dt - latest_dt).total_seconds()
         except Exception:
             latest_age_s = None
+    
+    server_ms = (time.perf_counter() - t0) * 1000.0
+
 
     return jsonify({
         "ok": True,
@@ -273,6 +279,7 @@ def api_health():
         "latest_ts": latest_ts,
         "latest_age_s": latest_age_s,
         "latest_error": err,
+        "server_ms": round(server_ms, 2),  # NEW
     })
 
 
