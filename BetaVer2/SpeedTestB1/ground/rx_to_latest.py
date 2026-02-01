@@ -84,6 +84,21 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 DEBUG = os.environ.get("RX_DEBUG", "0").lower() not in ("0", "", "false", "no", "off")
 
+# ----------------------------
+# RX performance counters
+# ----------------------------
+RX_STATS_PERIOD_S = 10.0
+
+rx_stats = {
+    "frames_ok": 0,
+    "frames_crc_fail": 0,
+    "msgs_ok": 0,
+    "msgs_timeout_drop": 0,
+    "bytes_in": 0,
+}
+
+_last_stats_print = time.time()
+
 
 def dbg(*args: object) -> None:
     if DEBUG:
@@ -238,6 +253,9 @@ def main() -> None:
         raw = pkt[0] if isinstance(pkt, (tuple, list)) and pkt else pkt
         raw = bytes(raw)
 
+        rx_stats["bytes_in"] += len(raw) #NEW
+
+
         last_rx_bytes_time = now
         last_good_rx_utc = utc_now()
 
@@ -301,6 +319,9 @@ def main() -> None:
             parsed_any_tm = True
             tm_stream = rest
 
+            rx_stats["frames_ok"] += 1   # counts every valid TM frame (fragment)
+
+
             msg_id = frame["msg_id"]
             frag_idx = frame["frag_idx"]
             frag_tot = frame["frag_tot"]
@@ -331,6 +352,8 @@ def main() -> None:
 
                 atomic_write_json(LATEST_PATH, record)
                 append_history(record)
+                rx_stats["msgs_ok"] += 1
+
 
                 last_decoded_time = now
                 last_heartbeat = now
@@ -361,6 +384,30 @@ def main() -> None:
             last_heartbeat = now
 
             print(f"RX OK (LEGACY) seq={record.get('seq')} rssi={meta.get('packet_rssi_dbm') if meta else None}")
+        
+        # ----------------------------
+        # Periodic RX stats print
+        # ----------------------------
+        now_stats = time.time()
+        if (now_stats - _last_stats_print) >= RX_STATS_PERIOD_S:
+            elapsed = now_stats - _last_stats_print
+            pps = rx_stats["msgs_ok"] / elapsed if elapsed > 0 else 0.0
+
+            print(
+                f"RX STATS ({int(elapsed)}s): "
+                f"msgs_ok={rx_stats['msgs_ok']} "
+                f"frames_ok={rx_stats['frames_ok']} "
+                f"pps={pps:.2f} "
+                f"bytes_in={rx_stats['bytes_in']} "
+                f"pending={len(pending)}"
+            )
+
+            # reset window counters
+            rx_stats["msgs_ok"] = 0
+            rx_stats["frames_ok"] = 0
+            rx_stats["bytes_in"] = 0
+            _last_stats_print = now_stats
+
 
 
 if __name__ == "__main__":
